@@ -1,0 +1,51 @@
+# Core web stack
+setuptools<82
+wheel
+
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-multipart==0.0.20
+pydantic==2.10.4
+python-dotenv==1.0.1
+
+# Gradio UI
+gradio==5.9.1
+
+# Database
+SQLAlchemy==2.0.36
+
+# LLM + embeddings + RAG
+openai==1.59.6
+sentence-transformers==3.3.1
+chromadb==0.5.23
+
+# Speech-to-text (openai-whisper is installed separately in Dockerfile)
+torch==2.5.1
+tiktoken==0.7.0
+
+# Audio signal analysis
+librosa==0.10.2.post1
+soundfile==0.12.1
+# Bundled ffmpeg binary fallback (used when the system ffmpeg is unavailable)
+imageio-ffmpeg==0.5.1
+# mediapipe wheels are compiled against numpy<2, and newer numba requires numpy>=2.
+# These pins keep the whole stack on the numpy 1.x line.
+numpy==1.26.4
+numba==0.60.0
+llvmlite==0.43.0
+scipy==1.14.1
+
+# Computer vision
+opencv-python==4.10.0.84
+mediapipe==0.10.14
+
+# Document parsing
+pdfplumber==0.11.4
+PyPDF2==3.0.1
+python-docx==1.1.2
+
+# PDF export
+fpdf2==2.8.1
+
+# Testing
+pytest==8.3.4
