@@ -31,8 +31,16 @@ class Settings:
             "OPENAI_BASE_URL", "https://api.openai.com/v1"
         )
         self.llm_model: str = os.getenv("LLM_MODEL", "gpt-4o-mini")
+        self.llm_timeout: float = float(os.getenv("LLM_TIMEOUT", "60"))
         self.prep_max_tokens: int = int(os.getenv("PREP_MAX_TOKENS", "8192"))
         self.prep_retries: int = int(os.getenv("PREP_RETRIES", "2"))
+        self.prep_fallback_path: str = os.getenv(
+            "PREP_FALLBACK_PATH", str(BASE_DIR / "data" / "prep_guide_fallback.json")
+        )
+        self.practice_fallback_path: str = os.getenv(
+            "PRACTICE_FALLBACK_PATH",
+            str(BASE_DIR / "data" / "practice_scorecard_fallback.json"),
+        )
         self.whisper_model: str = os.getenv("WHISPER_MODEL", "base")
         self.max_upload_mb: int = int(os.getenv("MAX_UPLOAD_MB", "200"))
         self.max_upload_bytes: int = self.max_upload_mb * 1024 * 1024

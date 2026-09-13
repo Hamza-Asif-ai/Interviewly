@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+from functools import lru_cache
 from typing import Any, Dict, List
 
 import gradio as gr
@@ -25,7 +26,7 @@ from ..services import (
 )
 from ..services.cv_parser import CVParseError, extract_text_from_file
 from ..services.pdf_export import build_prep_guide_pdf
-from ..services.prep_engine import PrepEngine, validate_guide
+from ..services.prep_engine import PrepEngine, load_fallback_guide, validate_guide
 
 logger = logging.getLogger(__name__)
 
@@ -118,9 +119,20 @@ def _generate_prep_handler(
     cv_file: str | None,
     job_description: str,
     company_overview: str,
+    fast_mode: bool = False,
 ):
     """Generate a prep guide and return markdown output and a PDF download path."""
     import traceback
+
+    if fast_mode:
+        logger.info("Prep Engine: Fast Mode ON - serving cached fallback guide.")
+        guide = load_fallback_guide()
+        pdf_path = None
+        try:
+            pdf_path = build_prep_guide_pdf(guide, settings.pdf_dir)
+        except Exception as exc:  # pragma: no cover - never fail the guide over PDF
+            logger.warning("PDF export failed in Fast Mode: %s", exc)
+        return _guide_to_markdown(guide), pdf_path
 
     if cv_file is None or not os.path.exists(cv_file):
         raise gr.Error("Please upload a CV file (PDF, DOCX or TXT).")
@@ -217,14 +229,65 @@ def _metrics_table(scorecard: Dict[str, Any]) -> List[List[Any]]:
     return rows
 
 
+@lru_cache(maxsize=1)
+def _load_practice_fallback() -> Dict[str, Any]:
+    """Load the cached demo scorecard used in Practice Fast Mode."""
+    logger.info("Loading practice demo scorecard from %s", settings.practice_fallback_path)
+    with open(settings.practice_fallback_path, "r", encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def _render_practice(
+    scorecard: Dict[str, Any],
+    review: Dict[str, Any],
+    transcript: str,
+) -> tuple:
+    """Render a scorecard into the Practice tab's output widgets."""
+    content_score = scorecard.get("content_score", 0)
+    speech_score = scorecard.get("speech_score", 0)
+    visual_score = scorecard.get("visual_score", 0)
+    overall_score = scorecard.get("overall_score", 0)
+
+    review_md = "## Strengths\n" + "\n".join(
+        f"- {s}" for s in review.get("strengths", [])
+    )
+    review_md += "\n\n## Weaknesses\n" + "\n".join(
+        f"- {w}" for w in review.get("weaknesses", [])
+    )
+    review_md += "\n\n## Improvement Tips\n" + "\n".join(
+        f"- {t}" for t in review.get("improvement_tips", [])
+    )
+
+    transcript_md = (
+        f"## Transcript\n\n<div dir='ltr' style='text-align:left'>> {transcript}</div>"
+        if transcript.strip() else
+        "## Transcript\n\n_No transcript detected — is audio present in the video?_"
+    )
+
+    return (
+        content_score,
+        speech_score,
+        visual_score,
+        overall_score,
+        _metrics_table(scorecard),
+        review_md,
+        transcript_md,
+    )
+
+
 def _analyze_practice_handler(
-    video: str | None, question_prompt: str
+    video: str | None, question_prompt: str, fast_mode: bool = False
 ) -> tuple:
     """Analyze a practice video end to end and return display outputs."""
+    import traceback
+
+    if fast_mode:
+        logger.info("Practice Engine: Fast Mode ON - serving cached scorecard.")
+        data = _load_practice_fallback()
+        return _render_practice(data["scorecard"], data["review"], data["transcript"])
+
     if video is None or not os.path.exists(video):
         raise gr.Error("Please upload or record a practice video.")
-
-    import traceback
 
     video_path = ""
     audio_path = ""
@@ -276,36 +339,7 @@ def _analyze_practice_handler(
             except OSError:
                 logger.warning("Could not delete temp file: %s", path_)
 
-        content_score = scorecard.get("content_score", 0)
-        speech_score = scorecard.get("speech_score", 0)
-        visual_score = scorecard.get("visual_score", 0)
-        overall_score = scorecard.get("overall_score", 0)
-
-        review_md = "## Strengths\n" + "\n".join(
-            f"- {s}" for s in review.get("strengths", [])
-        )
-        review_md += "\n\n## Weaknesses\n" + "\n".join(
-            f"- {w}" for w in review.get("weaknesses", [])
-        )
-        review_md += "\n\n## Improvement Tips\n" + "\n".join(
-            f"- {t}" for t in review.get("improvement_tips", [])
-        )
-
-        transcript_md = (
-            f"## Transcript\n\n<div dir='ltr' style='text-align:left'>> {transcript}</div>"
-            if transcript.strip() else
-            "## Transcript\n\n_No transcript detected — is audio present in the video?_"
-        )
-
-        return (
-            content_score,
-            speech_score,
-            visual_score,
-            overall_score,
-            _metrics_table(scorecard),
-            review_md,
-            transcript_md,
-        )
+        return _render_practice(scorecard, review, transcript)
     except gr.Error:
         raise
     except Exception as exc:  # pragma: no cover
@@ -352,6 +386,11 @@ def build_gradio_app() -> gr.Blocks:
                     generate_btn = gr.Button(
                         "Generate Guide", variant="primary"
                     )
+                    fast_mode_prep = gr.Checkbox(
+                        label="Fast Mode (instant demo)",
+                        value=False,
+                        info="Skip the LLM and serve the cached demo guide in ~0.5s.",
+                    )
                 with gr.Column(scale=2):
                     guide_output = gr.Markdown(
                         label="Preparation Guide", value=""
@@ -362,7 +401,7 @@ def build_gradio_app() -> gr.Blocks:
 
             generate_btn.click(
                 _generate_prep_handler,
-                inputs=[cv_file, job_desc, company_overview],
+                inputs=[cv_file, job_desc, company_overview, fast_mode_prep],
                 outputs=[guide_output, download_pdf],
             )
 
@@ -379,6 +418,11 @@ def build_gradio_app() -> gr.Blocks:
                         placeholder="e.g. Tell me about a time you led a project...",
                     )
                     analyze_btn = gr.Button("Analyze Performance", variant="primary")
+                    fast_mode_practice = gr.Checkbox(
+                        label="Fast Mode (instant demo)",
+                        value=False,
+                        info="Skip Whisper/MediaPipe and show the cached demo scorecard instantly.",
+                    )
                 with gr.Column(scale=2):
                     gr.Markdown("### Scorecard")
                     content_gauge = gr.Slider(
@@ -407,7 +451,7 @@ def build_gradio_app() -> gr.Blocks:
 
             analyze_btn.click(
                 _analyze_practice_handler,
-                inputs=[video_input, question_input],
+                inputs=[video_input, question_input, fast_mode_practice],
                 outputs=[
                     content_gauge,
                     speech_gauge,

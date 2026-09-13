@@ -21,6 +21,7 @@ from app.services.prep_engine import (  # noqa: E402
     PrepEngine,
     _chunk_text,
     _facts_sheet,
+    load_fallback_guide,
 )
 
 
@@ -76,6 +77,16 @@ class TestPrepEngine:
         ]
         for rule in rules:
             assert rule in PREP_SYSTEM_PROMPT
+        assert "5 technical questions, 3 behavioral questions" in PREP_SYSTEM_PROMPT
+        assert "at most 3 sentences" in PREP_SYSTEM_PROMPT
+
+    def test_fallback_guide_json_shape(self) -> None:
+        guide = load_fallback_guide()
+        assert len(guide["technical_questions"]) == 5
+        assert len(guide["behavioral_questions"]) == 3
+        assert guide.get("_fallback") is True
+        for key in ("positioning_tips", "skill_gaps"):
+            assert isinstance(guide[key], list) and guide[key]
 
     def test_facts_sheet_labels_sections(self) -> None:
         cv = (
@@ -115,8 +126,8 @@ class TestPrepEngine:
     def test_fallback_guide_shape(self) -> None:
         ctx = "Some context text"
         guide = PrepEngine._fallback_guide(ctx)
-        assert len(guide["technical_questions"]) == 8
-        assert len(guide["behavioral_questions"]) == 6
+        assert len(guide["technical_questions"]) == 5
+        assert len(guide["behavioral_questions"]) == 3
         assert len(guide["positioning_tips"]) == 5
         assert isinstance(guide["skill_gaps"], list)
 

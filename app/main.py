@@ -50,8 +50,8 @@ app.include_router(practice.router)
 
 @app.get("/health")
 def health() -> dict:
-    """Health check endpoint."""
-    return {"status": "ok", "app": "interviewly"}
+    """Health check endpoint (kept minimal and fast for uptime monitors)."""
+    return {"status": "ok"}
 
 
 gradio_app = build_gradio_app()

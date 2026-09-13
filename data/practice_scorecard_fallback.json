@@ -1,0 +1,54 @@
+{
+  "scorecard": {
+    "content_score": 7.4,
+    "speech_score": 7.8,
+    "visual_score": 8.2,
+    "overall_score": 7.7,
+    "text_metrics": {
+      "word_count": 245,
+      "words_per_minute": 138.0,
+      "filler_word_count": 12,
+      "filler_word_counts": {"um": 4, "uh": 3, "like": 2, "basically": 1, "you_know": 1, "matlab": 0, "yaani": 1},
+      "filler_words_per_minute": 6.8,
+      "conciseness_score": 7.7,
+      "star_score": 7.5,
+      "relevance_score": 7.2
+    },
+    "speech_metrics": {
+      "speaking_rate_wpm": 138.0,
+      "pause_ratio": 0.22,
+      "pitch_mean_hz": 148.0,
+      "pitch_std_hz": 52.0,
+      "energy_variance": 0.024,
+      "clarity_score": 8.1
+    },
+    "visual_metrics": {
+      "face_detection_percent": 92.0,
+      "eye_contact_percent": 81.0,
+      "posture_stability_score": 8.0,
+      "head_movement_score": 8.4,
+      "frames_analyzed": 452
+    }
+  },
+  "review": {
+    "strengths": [
+      "Clear STAR structure: the answer moves naturally through Situation, Task, Action and Result.",
+      "Strong eye contact and stable posture keep the interviewer engaged throughout.",
+      "A confident, steady speaking pace near the 120-160 words-per-minute ideal.",
+      "You connect your answer directly to the question's intent with relevant examples."
+    ],
+    "weaknesses": [
+      "Filler words (um/uh/like) appear about 7 per minute; aim for under 4 per minute.",
+      "The opening could be tighter - state the situation in one sentence before adding detail.",
+      "One result metric is implied rather than stated; quantify outcomes where possible."
+    ],
+    "improvement_tips": [
+      "Rehearse the answer aloud with a timer and record yourself weekly to track filler-word trends.",
+      "Open every answer with a single sentence that names the role, the goal, and the challenge.",
+      "End each answer with a concrete, measurable result (e.g., a percentage, a time saving, or a revenue figure).",
+      "Slow down slightly around key points so important metrics land clearly."
+    ]
+  },
+  "transcript": "In my previous role as a data analyst at ACME Analytics, the operations team needed faster access to weekly business reports. My task was to rebuild the reporting pipeline so stakeholders could trust the numbers without waiting for a manual backlog. I started by mapping the current process, then wrote SQL stored procedures to automate the data pulls and designed a Power BI dashboard on a star schema with clear KPI definitions agreed with the team. I also documented the pipeline so anyone could re-run it. As a result, report turnaround dropped by around 40 percent, and the same automated pipeline is still used every month. In the future I would double check the definition of each metric with the stakeholders even earlier, because agreeing on definitions up front saved us the most rework.",
+  "_fast": true
+}

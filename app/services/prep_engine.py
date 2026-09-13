@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
 import uuid
 import warnings
+from functools import lru_cache
 from typing import Any, Dict, List
 
 from sentence_transformers import SentenceTransformer
@@ -19,7 +21,13 @@ warnings.filterwarnings("ignore")
 
 logger = logging.getLogger(__name__)
 
-_EMBEDDER: SentenceTransformer | None = None
+
+@lru_cache(maxsize=1)
+def get_embedder() -> SentenceTransformer:
+    """Return the cached phrase-embedding model (loaded exactly once)."""
+    logger.info("Loading embedding model 'all-MiniLM-L6-v2' (first call only).")
+    return SentenceTransformer("all-MiniLM-L6-v2")
+
 
 PREP_SYSTEM_PROMPT = """You are an expert interview coach.
 
@@ -54,7 +62,7 @@ GROUNDING REQUIREMENTS:
 - Never call a role an "internship" unless the CV explicitly labels THAT specific role as an internship. A role written as "Dept."/'Department' or "Customer Service" is a job or position, not an internship, unless the CV text explicitly calls it an internship.
 - When the "VERIFIED CV FACTS" block is present, treat it as authoritative ground truth: every Answer fact must be traceable to a line in that block, and no Answer fact may contradict it.
 
-Produce EXACTLY this schema, with 8 technical questions, 6 behavioral questions, exactly 5 positioning tips, and exactly 5 skill gaps:
+Produce EXACTLY this schema, with 5 technical questions, 3 behavioral questions, exactly 5 positioning tips, and exactly 5 skill gaps:
 
 {
   "technical_questions": [
@@ -86,19 +94,12 @@ CONTENT RULES:
 - Each technical question must be specific to the provided job description.
 - Each behavioral question must reflect the provided company's values.
 - Every question needs a complete STAR answer (Situation, Task, Action, Result) using ONLY real facts from the candidate CV.
+- Keep every STAR answer SHORT: at most 3 sentences (Situation+Task in one sentence, Action in one, Result in one).
 - Positioning tips must explain why THIS candidate (as documented in the CV) is a good fit for THIS company.
 - Skill gaps must list skills appearing in the job description that are missing or weak on the CV.
 - Never attribute to the candidate a job title, employer, industry, degree, tool, certification, project, or metric that is not present in the CV context.
 
 Return only the single JSON object."""
-
-
-def get_embedder() -> SentenceTransformer:
-    """Return a cached sentence-transformers embedding model."""
-    global _EMBEDDER
-    if _EMBEDDER is None:
-        _EMBEDDER = SentenceTransformer("all-MiniLM-L6-v2")
-    return _EMBEDDER
 
 
 _SECTION_HEADERS: List[tuple] = [
@@ -286,6 +287,17 @@ def validate_guide(guide: Any) -> Dict[str, Any]:
     return guide
 
 
+@lru_cache(maxsize=1)
+def load_fallback_guide() -> Dict[str, Any]:
+    """Load the deterministic preview/crash-safe guide from JSON (cached)."""
+    path = settings.prep_fallback_path
+    logger.info("Loading fallback prep guide from %s", path)
+    with open(path, "r", encoding="utf-8") as fh:
+        guide: Dict[str, Any] = json.load(fh)
+    guide.setdefault("_fallback", True)
+    return guide
+
+
 class PrepEngine:
     """Generate interview prep guides from CV, JD and company overview."""
 
@@ -388,15 +400,18 @@ class PrepEngine:
         ]
         if not settings.has_llm():
             logger.warning("No LLM configured; returning fallback guide.")
-            return self._fallback_guide(context_block)
+            return load_fallback_guide()
 
         last_error: Exception | None = None
         for attempt in range(1, settings.prep_retries + 1):
             try:
-                content = await achat_completion(
-                    messages,
-                    temperature=0.2,
-                    max_tokens=settings.prep_max_tokens,
+                content = await asyncio.wait_for(
+                    achat_completion(
+                        messages,
+                        temperature=0.2,
+                        max_tokens=settings.prep_max_tokens,
+                    ),
+                    timeout=settings.llm_timeout,
                 )
                 logger.info(
                     "Prep LLM attempt %d/%d: received %d chars, starts=%r, "
@@ -436,7 +451,16 @@ class PrepEngine:
                     len(guide.get("skill_gaps", [])),
                 )
                 return guide
-            except Exception as exc:  # noqa: BLE001 - retry on any LLM/parse failure
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "LLM call exceeded %.0fs timeout (attempt %d/%d); "
+                    "returning fallback guide.",
+                    settings.llm_timeout,
+                    attempt,
+                    settings.prep_retries,
+                )
+                return load_fallback_guide()
+            except Exception as exc:  # noqa: BLE001 - retry on any other failure
                 last_error = exc
                 logger.warning(
                     "Prep LLM attempt %d/%d failed: %s",
@@ -459,10 +483,13 @@ class PrepEngine:
                     {"role": "user", "content": context_block},
                 ]
 
-        raise ValueError(
-            f"Prep guide generation failed after {settings.prep_retries} attempts. "
-            f"Last error: {last_error}"
-        ) from last_error
+        logger.warning(
+            "Prep guide generation failed after %d attempts (%s); "
+            "returning fallback guide.",
+            settings.prep_retries,
+            last_error,
+        )
+        return load_fallback_guide()
 
     def _retrieve_all(self, query: str) -> str:
         """Fetch a broad context window across sources for prompt injection."""
@@ -500,8 +527,8 @@ class PrepEngine:
             ),
         }
         return {
-            "technical_questions": [sample_question] * 8,
-            "behavioral_questions": [sample_question] * 6,
+            "technical_questions": [sample_question] * 5,
+            "behavioral_questions": [sample_question] * 3,
             "positioning_tips": [
                 "Map one quantifiable CV accomplishment to the company's flagship metric.",
                 "Mirror the company's vocabulary from its mission and job posting.",

@@ -2,41 +2,29 @@
   "technical_questions": [
     {
       "question": "How do you write and optimize SQL queries to produce business-ready datasets for analysts and stakeholders?",
-      "answer": "S: At ACME Analytics, reporting teams needed faster access to clean, reliable data for monthly business reviews. T: My task was to write SQL queries that pulled joined, filtered and transformed data so each report was reproducible and fast. A: I wrote parameterized SQL stored procedures, aligned on KPI definitions with stakeholders, and used indexing plus reduced column fan-out to keep queries quick. R: The automated SQL reduced report turnaround by 40%, and the same procedures are still reused every month."
+      "answer": "S: At ACME Analytics, reporting teams needed faster, cleaner data for monthly business reviews. T: I had to write repeatable, fast SQL. A: I wrote parameterized stored procedures, aligned KPI definitions with stakeholders, and used indexing plus reduced column fan-out. R: Automated SQL cut report turnaround by 40% and is still reused monthly."
     },
     {
       "question": "Walk me through how you would design a Power BI dashboard from requirements to launch.",
-      "answer": "S: The operations team at ACME Analytics needed one source of truth instead of multiple spreadsheets. T: My task was to design and ship a dashboard that the VP of Operations would actually use. A: I ran requirements-gathering sessions to agree KPIs, modelled a star schema in Power Query, built the measures in DAX, and iterated with the team on layouts. R: I delivered 40+ dashboards across sales, finance and operations, and the operations dashboard became the team's daily landing page."
+      "answer": "S: The operations team needed one source of truth instead of many spreadsheets. T: My task was to design and ship a dashboard the VP of Operations would use. A: I gathered KPIs with stakeholders, built a star schema in Power Query, wrote DAX measures, and iterated on layout. R: I shipped 40+ dashboards and the operations one became the daily landing page."
     },
     {
       "question": "Explain how you decide which metric matters for a business question.",
-      "answer": "S: A finance stakeholder asked for 'more reporting' without a clear objective. T: My task was to identify the decision the report was really supporting. A: I asked why the numbers were needed, who would act on them, and what a good vs bad outcome looked like, then mapped the request to core metrics like margin and conversion. R: We agreed on a focused dashboard tied to a pricing decision, which later helped increase margin by 6%."
+      "answer": "S: A finance stakeholder asked for more reporting without a clear objective. T: I needed to identify the real decision behind the request. A: I asked who would act on the numbers and what good versus bad outcomes looked like, then mapped the request to core metrics. R: We shipped a focused dashboard tied to a pricing decision that helped raise margin by 6%."
     },
     {
       "question": "What data-modeling approach do you use when combining sales, finance and operations data?",
-      "answer": "S: ACME's sales, finance and operations sources lived in separate tables with inconsistent keys. T: My task was to combine them without duplicating rows or misreporting revenue. A: I designed a star schema with shared date, product and region dimensions, cleaned keys in SQL, and enforced relationships in the model. R: The unified model cut reconciliation time and made cross-functional KPI reporting consistent."
+      "answer": "S: ACME's sales, finance and operations sources lived in separate tables with inconsistent keys. T: I had to combine them without duplicating rows or misreporting revenue. A: I designed a star schema with shared date, product and region dimensions and cleaned keys in SQL. R: The unified model cut reconciliation time and made cross-functional reporting consistent."
     },
     {
       "question": "Tell me how you would run a requirements-gathering session with non-technical stakeholders.",
-      "answer": "S: Business users wanted dashboards but were not data-literate. T: My task was to capture requirements that could actually be built. A: I prepared starter questions, sketched mock-ups, asked the 'what will you do with this number' question, and confirmed definitions in plain language. R: Sessions produced explicit KPI definitions and reduced rework, and the approach became my standard method for stakeholder alignment."
-    },
-    {
-      "question": "How do you handle duplicate or dirty data before analysis?",
-      "answer": "S: At NovaTech Solutions, customer records had duplicates, missing values and inconsistent formats. T: My task was to make the data suitable for weekly funnel reporting. A: I profiled the data in Python and SQL, de-duplicated on business keys, standardised categories, and documented the cleaning rules. R: The funnel report became trustworthy enough for the VP of Sales to base decisions on it."
-    },
-    {
-      "question": "A stakeholder asks for a KPI that contradicts the data. How do you respond?",
-      "answer": "S: A request demanded a dashboard showing a metric that the underlying data could not support. T: My task was to deliver value without fabricating numbers. A: I showed the stakeholder the raw data and explained what the number would and would not measure, then proposed an alternative metric that the data could support. R: We agreed a defensible KPI, and the stakeholder respected the honesty."
-    },
-    {
-      "question": "How would you track and communicate the performance of a project to stakeholders?",
-      "answer": "S: After adopting Agile at ACME, stakeholders wanted weekly visibility into analytics projects. T: My task was to keep reporting simple and current. A: I maintained a lightweight tracker in the shared workspace, updated metrics weekly, and sent a one-page summary before each stand-up. R: Stakeholders always knew project status, which built trust in the analytics team."
+      "answer": "S: Business users wanted dashboards but were not data-literate. T: My task was to capture requirements that could actually be built. A: I used starter questions, sketched mock-ups, asked what each number would drive, and confirmed definitions in plain language. R: Sessions produced explicit KPI definitions, reduced rework, and became my standard approach."
     }
   ],
   "behavioral_questions": [
     {
       "question": "Tell me about a time you improved an existing process.",
-      "answer": "S: Monthly reporting at ACME Analytics was manual and error-prone, consuming days of analyst time. T: My task was to remove the manual work without breaking the reporting cadence. A: I automated the pipelines in SQL and made the visuals self-updating in Power BI, then documented the process for the team. R: Report turnaround dropped by 40%, and the automation won ACME's 2023 Innovation Award."
+      "answer": "S: Monthly reporting at ACME Analytics was manual and error-prone, consuming days of analyst time. T: I needed to remove manual work without breaking the cadence. A: I automated the SQL pipelines and made the Power BI visuals self-updating, then documented it. R: Turnaround dropped 40% and the automation won ACME's 2023 Innovation Award."
     },
     {
       "question": "Describe a time you influenced a decision with data.",
@@ -44,19 +32,7 @@
     },
     {
       "question": "Tell me about a time you handled conflicting priorities from stakeholders.",
-      "answer": "S: Two teams asked for dashboards at the same time with similar deadlines. T: My task was to be transparent about capacity and sequence work. A: I rated the two requests by decision impact, agreed a sequence with both stakeholders, and delivered the business-critical dashboard first. R: Both teams got what they needed, and the sequencing logic became part of my intake triage."
-    },
-    {
-      "question": "Describe a time you made a mistake at work and how you handled it.",
-      "answer": "S: Early at NovaTech, I shipped a weekly funnel report with an incorrect filter on one segment. T: My task was to fix the error and protect trust. A: I flagged the bug immediately, corrected the numbers, and posted a clear revision note with the corrected insight. R: The team trusted the fix and the incident led me to add validation checks to every report thereafter."
-    },
-    {
-      "question": "Give an example of working with a difficult stakeholder.",
-      "answer": "S: A stakeholder kept asking for a dashboard that kept changing scope. T: My task was to get to a stable, useful deliverable. A: I stopped the cycle by writing down the agreed KPIs, sent a short confirmation, and got sign-off before building. R: The scope stabilised, the dashboard shipped, and the stakeholder became one of our strongest advocates."
-    },
-    {
-      "question": "Where do you see yourself contributing in your first 90 days?",
-      "answer": "S: I know onboarding time is precious in a new role. T: My task is to contribute early and learn fast. A: I would map the company's core data sources, understand the flagship KPIs, and pair with the analytics leads before proposing any changes. R: The goal for quarter one is to deliver one reliable, decision-ready dashboard and be a dependable teammate."
+      "answer": "S: Two teams requested dashboards at the same time with similar deadlines. T: I needed to be transparent about capacity and sequence work. A: I rated both requests by decision impact, agreed a sequence with both stakeholders, and delivered the business-critical dashboard first. R: Both teams got what they needed and the triage logic became standard practice."
     }
   ],
   "positioning_tips": [
@@ -72,5 +48,6 @@
     "DAX complexity beyond basic measures is not demonstrated — prepare one deeper DAX example to show modelling depth.",
     "No statistical modelling / forecasting skills are listed — mention it as an area you are actively learning.",
     "Direct experience with product analytics tools (Amplitude, Mixpanel) is absent — frame what you would do differently if asked."
-  ]
+  ],
+  "_fallback": true
 }
