@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 import unicodedata
 import uuid
 from typing import Any, Dict
@@ -98,10 +99,28 @@ def _qa_pairs(items: Any) -> list[tuple[str, str]]:
     return pairs
 
 
+def cleanup_old_pdfs(output_dir: str, ttl_hours: int = 48) -> None:
+    """Delete generated PDFs older than their time-to-live."""
+    if not os.path.isdir(output_dir):
+        return
+    cutoff = time.time() - ttl_hours * 3600
+    for name in os.listdir(output_dir):
+        if not name.startswith("prep_guide_") or not name.endswith(".pdf"):
+            continue
+        path = os.path.join(output_dir, name)
+        try:
+            if os.path.getmtime(path) < cutoff:
+                os.remove(path)
+                logger.info("Removed expired PDF %s", path)
+        except OSError as exc:  # pragma: no cover - best effort cleanup
+            logger.warning("Could not remove expired PDF %s: %s", path, exc)
+
+
 def build_prep_guide_pdf(
     guide: Dict[str, Any], output_dir: str, demo: bool = False
 ) -> str:
     """Render a prep guide dict into a PDF file and return its absolute path."""
+    cleanup_old_pdfs(output_dir)
     pdf = _PrepGuidePDF(format="A4")
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.set_margins(12, 12, 12)

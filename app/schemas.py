@@ -39,6 +39,7 @@ class PrepGuideResponse(BaseModel):
     company_overview: str
     guide: PrepGuide
     created_at: Optional[str] = None
+    access_token: Optional[str] = None
 
 
 class PracticeUploadResponse(BaseModel):
@@ -49,6 +50,7 @@ class PracticeUploadResponse(BaseModel):
     duration_seconds: float
     transcript: str
     scorecard: Dict[str, Any]
+    access_token: Optional[str] = None
 
 
 class FillerWordCounts(BaseModel):

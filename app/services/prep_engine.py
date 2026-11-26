@@ -316,13 +316,15 @@ class PrepEngine:
         self.company_overview: str = ""
 
     def _collection(self):
-        chroma_client = chromadb.PersistentClient(path=settings.chroma_dir)
+        # Ephemeral: embeddings never hit persistent storage, and cleanup()
+        # removes the in-memory collection when the request finishes.
+        chroma_client = chromadb.EphemeralClient()
         return chroma_client.get_or_create_collection(self.collection_name)
 
     def cleanup(self) -> None:
         """Delete this session's ChromaDB collection (best-effort)."""
         try:
-            chroma_client = chromadb.PersistentClient(path=settings.chroma_dir)
+            chroma_client = chromadb.EphemeralClient()
             chroma_client.delete_collection(self.collection_name)
             logger.info("Deleted ChromaDB collection '%s'.", self.collection_name)
         except Exception as exc:  # pragma: no cover - cleanup must never raise

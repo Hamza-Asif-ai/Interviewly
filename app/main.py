@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
+from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 
 import gradio as gr
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from .config import settings
 from .database import init_db
@@ -19,6 +23,10 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+_request_windows: dict[str, deque[float]] = defaultdict(deque)
+_analysis_slots = asyncio.Semaphore(max(1, settings.max_concurrent_analyses))
+_EXPENSIVE_PATHS = ("/prep/generate", "/practice/upload")
 
 
 @asynccontextmanager
@@ -36,13 +44,43 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+cors_origins = settings.cors_origins or ["http://localhost:7860"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
+    allow_origins=cors_origins,
+    allow_credentials=bool(settings.cors_origins),
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def guard_requests(request: Request, call_next):
+    """Bound per-IP request rate and expensive-analysis concurrency."""
+    client_ip = request.client.host if request.client else "unknown"
+    now = time.monotonic()
+    window = _request_windows[client_ip]
+    while window and now - window[0] > 60:
+        window.popleft()
+    if len(window) >= settings.rate_limit_per_minute:
+        return JSONResponse(
+            status_code=429, content={"detail": "Too many requests. Try again shortly."}
+        )
+    window.append(now)
+
+    if not request.url.path.startswith(_EXPENSIVE_PATHS):
+        return await call_next(request)
+    try:
+        await asyncio.wait_for(_analysis_slots.acquire(), timeout=0.2)
+    except asyncio.TimeoutError:
+        return JSONResponse(
+            status_code=429, content={"detail": "Server busy. Please retry shortly."}
+        )
+    try:
+        return await call_next(request)
+    finally:
+        _analysis_slots.release()
+
 
 app.include_router(prep.router)
 app.include_router(practice.router)
@@ -55,7 +93,9 @@ def health() -> dict:
 
 
 gradio_app = build_gradio_app()
-app = gr.mount_gradio_app(app, gradio_app, path="/")
+app = gr.mount_gradio_app(
+    app, gradio_app, path="/", max_file_size=settings.max_upload_bytes
+)
 
 if __name__ == "__main__":
     import uvicorn

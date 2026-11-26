@@ -224,6 +224,12 @@ def _generate_prep_handler(
     except Exception as exc:  # pragma: no cover
         logger.error("Prep generation failed: %s", traceback.format_exc())
         raise gr.Error(f"Prep generation failed: {exc}") from exc
+    finally:
+        if cv_file and os.path.exists(cv_file):
+            try:
+                os.remove(cv_file)
+            except OSError as exc:  # pragma: no cover
+                logger.warning("Could not remove uploaded CV: %s", exc)
 
 
 # --------------------------------------------------------------------------- #
@@ -353,19 +359,19 @@ def _analyze_practice_handler(
         finally:
             db.close()
 
-        for path_ in (audio_path, video_path):
-            try:
-                if path_ and os.path.exists(path_) and path_ != video:
-                    os.remove(path_)
-            except OSError:
-                logger.warning("Could not delete temp file: %s", path_)
-
         return _render_practice(scorecard, review, transcript)
     except gr.Error:
         raise
     except Exception as exc:  # pragma: no cover
         logger.error("Practice analysis failed: %s", traceback.format_exc())
-        raise gr.Error(f"Analysis failed: {exc}") from exc
+        raise gr.Error("Analysis failed. Please retry with a clear video.") from exc
+    finally:
+        for path_ in (audio_path, video_path, video):
+            try:
+                if path_ and os.path.exists(path_):
+                    os.remove(path_)
+            except OSError as exc:  # pragma: no cover
+                logger.warning("Could not delete temp file %s: %s", path_, exc)
 
 
 def _probe_duration(wav_path: str) -> float:
@@ -380,7 +386,9 @@ def _probe_duration(wav_path: str) -> float:
 # --------------------------------------------------------------------------- #
 def build_gradio_app() -> gr.Blocks:
     """Construct the Gradio Blocks application."""
-    with gr.Blocks(title=APP_TITLE, theme=gr.themes.Soft()) as demo:
+    with gr.Blocks(
+        title=APP_TITLE, theme=gr.themes.Soft(), delete_cache=(300, 300)
+    ) as demo:
         gr.Markdown(f"# {APP_TITLE}")
         gr.Markdown(
             "Prepare for interviews with tailored questions and STAR answers, then "

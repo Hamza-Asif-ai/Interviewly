@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import hmac
 import json
 import logging
 import os
+import secrets
 import uuid
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
 from ..config import settings
@@ -93,9 +95,11 @@ async def generate_prep_guide(
                 "not based on your CV."
             ),
         ) from exc
-    except Exception as exc:
+    except Exception:
         logger.exception("Prep generation failed.")
-        raise HTTPException(status_code=500, detail=f"Prep generation failed: {exc}") from exc
+        raise HTTPException(
+            status_code=500, detail="Prep generation failed. Please retry shortly."
+        )
     finally:
         await run_in_threadpool(engine.cleanup)
 
@@ -103,21 +107,25 @@ async def generate_prep_guide(
         raise HTTPException(status_code=500, detail="Model returned an unexpected guide shape.")
 
     guide_json = json.dumps(guide_data)
+    access_token = secrets.token_urlsafe(24)
     guide = PrepGuideModel(
         session_id=session.id,
         cv_filename=cv_file.filename or "cv",
         job_description=job_description,
         company_overview=company_overview,
         guide_json=guide_json,
+        access_token=access_token,
     )
     db.add(guide)
     db.commit()
     db.refresh(guide)
 
-    return _to_response(guide)
+    return _to_response(guide, include_token=access_token)
 
 
-def _to_response(guide: PrepGuideModel) -> PrepGuideResponse:
+def _to_response(
+    guide: PrepGuideModel, include_token: str | None = None
+) -> PrepGuideResponse:
     """Convert an ORM PrepGuide into the response schema."""
     data = json.loads(guide.guide_json)
     technical = [Question(**item) for item in data.get("technical_questions", [])]
@@ -134,13 +142,24 @@ def _to_response(guide: PrepGuideModel) -> PrepGuideResponse:
             skill_gaps=data.get("skill_gaps", []),
         ),
         created_at=str(guide.created_at.isoformat()) if guide.created_at else None,
+        access_token=include_token,
     )
 
 
-@router.get("/{guide_id}", response_model=PrepGuideResponse)
-def get_prep_guide(guide_id: int, db: Session = Depends(get_db)) -> PrepGuideResponse:
-    """Return a previously generated prep guide by id."""
+@router.get(
+    "/{guide_id}", response_model=PrepGuideResponse, response_model_exclude_none=True
+)
+def get_prep_guide(
+    guide_id: int,
+    x_access_token: str | None = Header(default=None, alias="X-Access-Token"),
+    db: Session = Depends(get_db),
+) -> PrepGuideResponse:
+    """Return a previously generated prep guide by id, if the token matches."""
     guide = db.get(PrepGuideModel, guide_id)
-    if guide is None:
+    if guide is None or not guide.access_token:
+        raise HTTPException(status_code=404, detail="Prep guide not found.")
+    if not x_access_token or not hmac.compare_digest(
+        guide.access_token, x_access_token
+    ):
         raise HTTPException(status_code=404, detail="Prep guide not found.")
     return _to_response(guide)

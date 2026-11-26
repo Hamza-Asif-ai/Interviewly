@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import hmac
 import json
 import logging
 import os
+import secrets
 import uuid
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
 from ..config import settings
@@ -81,7 +83,6 @@ def _cleanup(paths) -> None:
 @router.post("/upload")
 async def upload_practice_video(
     video_file: UploadFile = File(...),
-    session_id: int = Form(default=0),
     question_prompt: str = Form(default=""),
     db: Session = Depends(get_db),
 ) -> dict:
@@ -137,19 +138,19 @@ async def upload_practice_video(
         scorecard = build_scorecard(text_metrics, speech_metrics, visual_metrics)
         review = await analyze_report_with_llm(scorecard)
 
+        access_token = secrets.token_urlsafe(24)
         report = AnalysisReport(
             video_id=0,
             transcript=transcript,
             report_json=json.dumps({**scorecard, **review}),
+            access_token=access_token,
         )
 
-        saved_session = None
-        if session_id and session_id > 0:
-            saved_session = db.get(DBSession, session_id)
-        if saved_session is None:
-            saved_session = DBSession(title="Practice session")
-            db.add(saved_session)
-            db.flush()
+        # A fresh session is always created; clients never choose whose session
+        # a report is attached to.
+        saved_session = DBSession(title="Practice session")
+        db.add(saved_session)
+        db.flush()
 
         video = PracticeVideo(
             session_id=saved_session.id,
@@ -174,12 +175,15 @@ async def upload_practice_video(
         logger.warning("Transcription unavailable: %s", exc)
         _cleanup([video_path, audio_path])
         raise HTTPException(
-            status_code=503, detail=f"Transcription unavailable: {exc}"
+            status_code=503,
+            detail="Transcription unavailable. Upload a video with clear audio and retry.",
         ) from exc
-    except Exception as exc:
+    except Exception:
         logger.exception("Practice analysis failed.")
         _cleanup([video_path, audio_path])
-        raise HTTPException(status_code=500, detail=f"Analysis failed: {exc}") from exc
+        raise HTTPException(
+            status_code=500, detail="Analysis failed. Please retry shortly."
+        )
 
     # Privacy: local video/audio deleted immediately after processing.
     _cleanup([video_path, audio_path])
@@ -191,6 +195,7 @@ async def upload_practice_video(
         "duration_seconds": video.duration_seconds,
         "transcript": transcript,
         "scorecard": result,
+        "access_token": access_token,
     }
 
 
@@ -223,15 +228,19 @@ async def _run_analysis(
 
 @router.get("/{video_id}/report")
 def get_practice_report(
-    video_id: int, db: Session = Depends(get_db)
+    video_id: int,
+    x_access_token: str | None = Header(default=None, alias="X-Access-Token"),
+    db: Session = Depends(get_db),
 ) -> dict:
-    """Return the saved analysis report for a practice video."""
+    """Return the saved analysis report for a practice video, if the token matches."""
     video = db.get(PracticeVideo, video_id)
-    if video is None:
-        raise HTTPException(status_code=404, detail="Practice video not found.")
-    if video.report is None:
-        raise HTTPException(status_code=404, detail="No report generated for this video.")
+    if video is None or video.report is None or not video.report.access_token:
+        raise HTTPException(status_code=404, detail="Practice report not found.")
     report = video.report
+    if not x_access_token or not hmac.compare_digest(
+        report.access_token, x_access_token
+    ):
+        raise HTTPException(status_code=404, detail="Practice report not found.")
     data = json.loads(report.report_json)
     return {
         "id": report.id,
