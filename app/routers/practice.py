@@ -22,6 +22,7 @@ from ..services import (
     transcribe_audio,
     extract_audio_from_video,
 )
+from ..services.transcription import TranscriptionError
 from starlette.concurrency import run_in_threadpool
 
 logger = logging.getLogger(__name__)
@@ -29,6 +30,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/practice", tags=["practice"])
 
 VIDEO_EXTENSIONS = (".mp4", ".mov", ".avi", ".mkv", ".webm")
+MIN_TRANSCRIPT_WORDS = 3
 
 
 async def _save_video(file: UploadFile, extension: str) -> str:
@@ -85,6 +87,14 @@ async def upload_practice_video(
         duration = await _probe_duration(audio_path)
 
         transcript = await run_in_threadpool(transcribe_audio, audio_path)
+        if len(transcript.split()) < MIN_TRANSCRIPT_WORDS:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "No speech detected: the transcript had fewer than "
+                    f"{MIN_TRANSCRIPT_WORDS} words."
+                ),
+            )
 
         text_metrics, speech_metrics, visual_metrics = await _run_analysis(
             transcript, audio_path, video_path, duration, question_prompt
@@ -122,6 +132,15 @@ async def upload_practice_video(
         db.commit()
         db.refresh(report)
         db.refresh(video)
+    except HTTPException:
+        _cleanup([video_path, audio_path])
+        raise
+    except TranscriptionError as exc:
+        logger.warning("Transcription unavailable: %s", exc)
+        _cleanup([video_path, audio_path])
+        raise HTTPException(
+            status_code=503, detail=f"Transcription unavailable: {exc}"
+        ) from exc
     except Exception as exc:
         logger.exception("Practice analysis failed.")
         _cleanup([video_path, audio_path])
@@ -158,7 +177,8 @@ async def _run_analysis(
     import asyncio
 
     text_task = asyncio.create_task(analyze_text(transcript, duration, question_prompt))
-    audio_task = run_in_threadpool(analyze_audio, audio_path)
+    word_count = len(transcript.split())
+    audio_task = run_in_threadpool(analyze_audio, audio_path, word_count)
     video_task = run_in_threadpool(analyze_video, video_path)
     text_metrics, speech_metrics, visual_metrics = await asyncio.gather(
         text_task, audio_task, video_task

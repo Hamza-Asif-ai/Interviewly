@@ -123,19 +123,6 @@ class TestPrepEngine:
         assert "CustomerSrviceDept.(3Months) || FrontendDeveloper" in sheet
         assert "June2023-August2023 || August2024" in sheet
 
-    def test_fallback_guide_shape(self) -> None:
-        ctx = "Some context text"
-        guide = PrepEngine._fallback_guide(ctx)
-        assert len(guide["technical_questions"]) == 5
-        assert len(guide["behavioral_questions"]) == 3
-        assert len(guide["positioning_tips"]) == 5
-        assert isinstance(guide["skill_gaps"], list)
-
-    def test_fallback_answers_are_star(self) -> None:
-        guide = PrepEngine._fallback_guide("ctx")
-        answer = guide["technical_questions"][0]["answer"]
-        assert "S:" in answer and "R:" in answer
-
     def test_index_and_generate_offline(self, tmp_path) -> None:
         """Index documents and generate a guide without an LLM API key."""
         try:

@@ -98,7 +98,9 @@ def _qa_pairs(items: Any) -> list[tuple[str, str]]:
     return pairs
 
 
-def build_prep_guide_pdf(guide: Dict[str, Any], output_dir: str) -> str:
+def build_prep_guide_pdf(
+    guide: Dict[str, Any], output_dir: str, demo: bool = False
+) -> str:
     """Render a prep guide dict into a PDF file and return its absolute path."""
     pdf = _PrepGuidePDF(format="A4")
     pdf.set_auto_page_break(auto=True, margin=15)
@@ -127,6 +129,17 @@ def build_prep_guide_pdf(guide: Dict[str, Any], output_dir: str) -> str:
         new_x=XPos.LMARGIN, new_y=YPos.NEXT,
     )
     pdf.ln(4)
+    if demo or guide.get("_fallback"):
+        pdf.set_font("helvetica", "B", 11)
+        pdf.set_text_color(180, 40, 40)
+        pdf.multi_cell(
+            0, 7,
+            sanitize_pdf_text(
+                "DEMO DATA - not based on your CV or the job description."
+            ),
+            new_x=XPos.LMARGIN, new_y=YPos.NEXT,
+        )
+        pdf.ln(2)
     pdf.set_text_color(0, 0, 0)
 
     def section(title: str) -> None:

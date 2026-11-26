@@ -15,7 +15,7 @@ from ..database import get_db
 from ..models import PrepGuide as PrepGuideModel
 from ..models import Session as DBSession
 from ..services.cv_parser import extract_text_from_file, CVParseError
-from ..services.prep_engine import PrepEngine
+from ..services.prep_engine import PrepEngine, PrepGuideError, load_fallback_guide
 from ..schemas import PrepGuide as PrepGuideSchema
 from ..schemas import PrepGuideResponse, Question
 from starlette.concurrency import run_in_threadpool
@@ -49,6 +49,7 @@ async def generate_prep_guide(
     cv_file: UploadFile = File(...),
     job_description: str = Form(..., min_length=1),
     company_overview: str = Form(default=""),
+    fast_mode: bool = Form(default=False),
     db: Session = Depends(get_db),
 ) -> PrepGuideResponse:
     """Generate a preparation guide from a CV, job description, and company overview."""
@@ -75,13 +76,28 @@ async def generate_prep_guide(
 
     engine = PrepEngine(str(session.id))
     try:
-        await run_in_threadpool(
-            engine.index_documents, cv_text, job_description, company_overview
-        )
-        guide_data = await engine.generate()
+        if fast_mode:
+            logger.info("Fast Mode: serving clearly labelled demo prep guide.")
+            guide_data = load_fallback_guide()
+        else:
+            await run_in_threadpool(
+                engine.index_documents, cv_text, job_description, company_overview
+            )
+            guide_data = await engine.generate()
+    except PrepGuideError as exc:
+        logger.warning("Prep generation unavailable: %s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"{exc} Enable Fast Mode for a demo guide that is explicitly "
+                "not based on your CV."
+            ),
+        ) from exc
     except Exception as exc:
         logger.exception("Prep generation failed.")
         raise HTTPException(status_code=500, detail=f"Prep generation failed: {exc}") from exc
+    finally:
+        await run_in_threadpool(engine.cleanup)
 
     if not isinstance(guide_data, dict):
         raise HTTPException(status_code=500, detail="Model returned an unexpected guide shape.")

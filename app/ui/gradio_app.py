@@ -26,7 +26,12 @@ from ..services import (
 )
 from ..services.cv_parser import CVParseError, extract_text_from_file
 from ..services.pdf_export import build_prep_guide_pdf
-from ..services.prep_engine import PrepEngine, load_fallback_guide, validate_guide
+from ..services.prep_engine import (
+    PrepEngine,
+    PrepGuideError,
+    load_fallback_guide,
+    validate_guide,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +79,13 @@ def _guide_to_markdown(guide: Dict[str, Any]) -> str:
         )
 
     lines = ["# Interview Preparation Guide", ""]
+    if guide.get("_fallback"):
+        lines.extend(
+            [
+                "> **DEMO DATA - not based on your CV or the job description.**",
+                "",
+            ]
+        )
 
     lines.append("## Technical Questions")
     for i, item in enumerate(guide.get("technical_questions", []), start=1):
@@ -129,7 +141,7 @@ def _generate_prep_handler(
         guide = load_fallback_guide()
         pdf_path = None
         try:
-            pdf_path = build_prep_guide_pdf(guide, settings.pdf_dir)
+            pdf_path = build_prep_guide_pdf(guide, settings.pdf_dir, demo=True)
         except Exception as exc:  # pragma: no cover - never fail the guide over PDF
             logger.warning("PDF export failed in Fast Mode: %s", exc)
         return _guide_to_markdown(guide), pdf_path
@@ -152,8 +164,11 @@ def _generate_prep_handler(
             db.flush()
 
             engine = PrepEngine(str(session.id))
-            engine.index_documents(cv_text, job_description, company_overview)
-            guide = _run(engine.generate())
+            try:
+                engine.index_documents(cv_text, job_description, company_overview)
+                guide = _run(engine.generate())
+            finally:
+                engine.cleanup()
 
             if not isinstance(guide, dict):
                 raise gr.Error("The model returned an unexpected guide shape.")
@@ -191,7 +206,9 @@ def _generate_prep_handler(
 
         pdf_path = None
         try:
-            pdf_path = build_prep_guide_pdf(guide, settings.pdf_dir)
+            pdf_path = build_prep_guide_pdf(
+                guide, settings.pdf_dir, demo=bool(guide.get("_fallback"))
+            )
             logger.info("Prep guide PDF saved to: %s", pdf_path)
         except Exception as exc:  # pragma: no cover - never fail the guide over PDF
             logger.warning(
@@ -200,6 +217,10 @@ def _generate_prep_handler(
         return _guide_to_markdown(guide), pdf_path
     except gr.Error:
         raise
+    except PrepGuideError as exc:
+        raise gr.Error(
+            f"{exc} Enable Fast Mode if you only want a clearly labelled demo."
+        ) from exc
     except Exception as exc:  # pragma: no cover
         logger.error("Prep generation failed: %s", traceback.format_exc())
         raise gr.Error(f"Prep generation failed: {exc}") from exc
@@ -301,7 +322,7 @@ def _analyze_practice_handler(
         duration = _probe_duration(audio_path)
         transcript = transcribe_audio(audio_path)
         text_metrics = _run(analyze_text(transcript, duration, question_prompt))
-        speech_metrics = analyze_audio(audio_path)
+        speech_metrics = analyze_audio(audio_path, len(transcript.split()))
         visual_metrics = analyze_video(video_path)
         scorecard = build_scorecard(text_metrics, speech_metrics, visual_metrics)
         review = _run(analyze_report_with_llm(scorecard))

@@ -56,8 +56,12 @@ class FillerWordCounts(BaseModel):
 
     um: int = 0
     uh: int = 0
+    erm: int = 0
+    hmm: int = 0
     like: int = 0
     basically: int = 0
+    literally: int = 0
+    actually: int = 0
     you_know: int = 0
     matlab: int = 0
     yaani: int = 0
@@ -71,16 +75,18 @@ class TextMetrics(BaseModel):
     filler_word_count: int
     filler_word_counts: FillerWordCounts
     filler_words_per_minute: float
-    conciseness_score: float = Field(ge=0, le=10)
+    conciseness_score: Optional[float] = Field(default=None, ge=0, le=10)
     star_score: float = Field(ge=0, le=10)
-    relevance_score: float = Field(ge=0, le=10)
+    relevance_score: Optional[float] = Field(default=None, ge=0, le=10)
 
 
 class SpeechMetrics(BaseModel):
     """Metrics from audio signal analysis."""
 
     speaking_rate_wpm: float
+    words_per_minute: float = 0.0
     pause_ratio: float
+    pause_count: int = 0
     pitch_mean_hz: float
     pitch_std_hz: float
     energy_variance: float
@@ -105,7 +111,7 @@ class AnalysisReportResponse(BaseModel):
     transcript: str
     content_score: float
     speech_score: float
-    visual_score: float
+    visual_score: Optional[float]
     overall_score: float
     text_metrics: TextMetrics
     speech_metrics: SpeechMetrics

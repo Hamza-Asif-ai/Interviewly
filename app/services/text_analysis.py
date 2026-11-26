@@ -13,12 +13,25 @@ logger = logging.getLogger(__name__)
 FILLER_WORDS: Dict[str, int] = {
     "um": 0,
     "uh": 0,
+    "erm": 0,
+    "hmm": 0,
     "like": 0,
     "basically": 0,
-    "you know": 0,
+    "literally": 0,
+    "actually": 0,
+    "you_know": 0,
     "matlab": 0,
     "yaani": 0,
 }
+
+_PLAIN_FILLER_RE = re.compile(
+    r"(?<!\w)(?:um|uh|erm|hmm|basically|literally|actually|matlab|yaani|you[\s_-]+know)(?!\w)",
+    re.IGNORECASE,
+)
+_LIKE_FILLER_RE = re.compile(
+    r"(?:^|(?<=[.!?])\s+|(?<=,)\s+)like\b(?=[,!?]|\s+(?:I mean|you know|I guess))",
+    re.IGNORECASE,
+)
 
 _TEXT_REVIEW_PROMPT = """You are an interview coach scoring a candidate's transcribed answer.
 TASK: return ONLY valid JSON with this shape (no commentary):
@@ -38,16 +51,20 @@ SCORING GUIDELINES:
 
 
 def _count_filler_words(text: str) -> Tuple[int, Dict[str, int]]:
-    """Count occurrences of each filler word/phrase in the transcript."""
-    lower = " " + text.lower() + " "
-    result: Dict[str, int] = {}
-    total = 0
-    for word, _ in FILLER_WORDS.items():
-        pattern = r"(?<!\w)" + re.escape(word) + r"(?!\w)"
-        count = len(re.findall(pattern, lower))
-        result[word] = count
-        total += count
-    return total, result
+    """Count fillers with word boundaries, one key for all 'you know' variants.
+
+    'like' only counts as a discourse marker (sentence/comma-initial, or
+    followed by 'I mean'/'you know'), not as the verb in 'I like Python'.
+    """
+    normalized = re.sub(r"you[\s_-]+know", "you_know", text, flags=re.IGNORECASE)
+    result = dict(FILLER_WORDS)
+    for match in _PLAIN_FILLER_RE.finditer(normalized):
+        word = re.sub(r"\s+", "_", match.group(0).lower())
+        word = "you_know" if word.startswith("you") else word
+        if word in result:
+            result[word] += 1
+    result["like"] += len(_LIKE_FILLER_RE.findall(normalized))
+    return sum(result.values()), result
 
 
 def _simple_star_check(text: str) -> float:
@@ -72,12 +89,17 @@ def _simple_star_check(text: str) -> float:
     return round(10 * hits / max(total, 1), 1)
 
 
-async def _llm_scores(text: str, question_prompt: str | None) -> Tuple[float, float, float]:
-    """Get STAR, relevance and conciseness scores via LLM."""
-    if not settings_has_llm():
-        return _simple_star_check(text), 7.0, 6.5
+async def _llm_scores(
+    text: str, question_prompt: str | None
+) -> Tuple[float, float | None, float | None, str]:
+    """Get STAR, relevance and conciseness scores via LLM.
 
-    from ..config import settings
+    Returns `(star, relevance, conciseness, scoring_mode)`. Missing signals
+    stay `None` rather than being silently replaced with a fixed 7.0/6.5.
+    """
+    heuristic_star = _simple_star_check(text)
+    if not settings_has_llm():
+        return heuristic_star, None, None, "heuristic"
 
     user_msg = (
         f"Question the candidate was answering: {question_prompt or '(none provided)'}\n\n"
@@ -85,25 +107,38 @@ async def _llm_scores(text: str, question_prompt: str | None) -> Tuple[float, fl
         f"{text[:3000]}\n\n"
         "Return ONLY the JSON described in the system prompt."
     )
-    content = await achat_completion(
-        [
-            {"role": "system", "content": _TEXT_REVIEW_PROMPT},
-            {"role": "user", "content": user_msg},
-        ],
-        temperature=0.0,
-    )
     try:
+        content = await achat_completion(
+            [
+                {"role": "system", "content": _TEXT_REVIEW_PROMPT},
+                {"role": "user", "content": user_msg},
+            ],
+            temperature=0.0,
+        )
         data = await extract_faithful_json(content)
-        star = float(data.get("star_score", 5.0))
-        relevance = float(data.get("relevance_score", 5.0))
-        conciseness = float(data.get("conciseness_score", 5.0))
-    except Exception as exc:  # pragma: no cover
-        logger.warning("Failed to parse LLM scores: %s", exc)
-        star, relevance, conciseness = _simple_star_check(text), 6.0, 6.0
+    except Exception as exc:  # includes rate limits and transport errors
+        logger.warning("LLM scoring unavailable (%s); using heuristic only.", exc)
+        return heuristic_star, None, None, "heuristic"
+
+    def _score(key: str) -> float | None:
+        value = data.get(key)
+        if value is None:
+            return None
+        try:
+            return max(0.0, min(10.0, float(value)))
+        except (TypeError, ValueError):
+            return None
+
+    star = _score("star_score")
+    relevance = _score("relevance_score")
+    conciseness = _score("conciseness_score")
+    if star is None and relevance is None and conciseness is None:
+        return heuristic_star, None, None, "heuristic"
     return (
-        max(0, min(10, star)),
-        max(0, min(10, relevance)),
-        max(0, min(10, conciseness)),
+        star if star is not None else heuristic_star,
+        relevance,
+        conciseness,
+        "llm",
     )
 
 
@@ -133,7 +168,12 @@ async def analyze_text(
     filler_total, filler_counts = _count_filler_words(transcript)
     fpm = round(filler_total / minutes, 2)
 
-    star_score, relevance_score, conciseness_score = await _llm_scores(transcript, question_prompt)
+    star_score, relevance_score, conciseness_score, scoring_mode = await _llm_scores(
+        transcript, question_prompt
+    )
+
+    if conciseness_score is not None and 60 <= duration_seconds <= 120:
+        conciseness_score = max(0.0, min(10.0, conciseness_score + 1.0))
 
     return {
         "word_count": word_count,
@@ -141,10 +181,12 @@ async def analyze_text(
         "filler_word_count": filler_total,
         "filler_word_counts": filler_counts,
         "filler_words_per_minute": fpm,
-        "conciseness_score": round(
-            max(0, min(10, conciseness_score + (1 if 60 <= duration_seconds <= 120 else 0))),
-            2,
+        "conciseness_score": (
+            round(conciseness_score, 2) if conciseness_score is not None else None
         ),
         "star_score": round(max(0, min(10, star_score)), 2),
-        "relevance_score": round(max(0, min(10, relevance_score)), 2),
+        "relevance_score": (
+            round(relevance_score, 2) if relevance_score is not None else None
+        ),
+        "scoring_mode": scoring_mode,
     }

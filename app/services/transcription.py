@@ -6,11 +6,17 @@ import logging
 import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 from ..config import settings
 
 logger = logging.getLogger(__name__)
+
+
+class TranscriptionError(RuntimeError):
+    """No usable transcription source was available for the audio file."""
+
 
 _WHISPER_MODEL = None
 
@@ -123,10 +129,16 @@ def _ensure_ffmpeg_on_path() -> None:
 
 
 def _transcribe_local(audio_path: str) -> str:
-    """Transcribe using local openai-whisper."""
+    """Transcribe using local openai-whisper.
+
+    Language is auto-detected by default; set WHISPER_LANG to force one.
+    """
     _ensure_ffmpeg_on_path()  # whisper reads AUDIO_TOOLS_FFMPEG at import time
     model = _load_local_model()
-    result = model.transcribe(audio_path, language="ur")
+    if settings.whisper_lang:
+        result = model.transcribe(audio_path, language=settings.whisper_lang)
+    else:
+        result = model.transcribe(audio_path)
     return (result.get("text") or "").strip()
 
 
@@ -192,6 +204,7 @@ def transcribe_audio(audio_path: str) -> str:
     if not os.path.exists(audio_path):
         raise FileNotFoundError(f"Audio file not found: {audio_path}")
 
+    start = time.perf_counter()
     text = ""
     if not settings.whisper_api_enabled:
         try:
@@ -208,7 +221,12 @@ def transcribe_audio(audio_path: str) -> str:
             logger.warning("Whisper API failed (%s).", exc)
 
     if not text:
-        logger.warning("No working transcription source; returning empty transcript.")
-        return ""
+        logger.warning("No working transcription source for %s.", audio_path)
+        logger.info("Whisper transcription took %.2fs", time.perf_counter() - start)
+        raise TranscriptionError(
+            "Transcription unavailable: no Whisper model or API could transcribe the audio."
+        )
 
-    return urdu_to_english(text)
+    result = urdu_to_english(text)
+    logger.info("Whisper transcription took %.2fs", time.perf_counter() - start)
+    return result

@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 import uuid
 import warnings
 from functools import lru_cache
@@ -20,6 +21,10 @@ from .llm import achat_completion, extract_faithful_json
 warnings.filterwarnings("ignore")
 
 logger = logging.getLogger(__name__)
+
+
+class PrepGuideError(RuntimeError):
+    """Raised when a real, CV-grounded prep guide could not be generated."""
 
 
 @lru_cache(maxsize=1)
@@ -314,6 +319,19 @@ class PrepEngine:
         chroma_client = chromadb.PersistentClient(path=settings.chroma_dir)
         return chroma_client.get_or_create_collection(self.collection_name)
 
+    def cleanup(self) -> None:
+        """Delete this session's ChromaDB collection (best-effort)."""
+        try:
+            chroma_client = chromadb.PersistentClient(path=settings.chroma_dir)
+            chroma_client.delete_collection(self.collection_name)
+            logger.info("Deleted ChromaDB collection '%s'.", self.collection_name)
+        except Exception as exc:  # pragma: no cover - cleanup must never raise
+            logger.warning(
+                "Could not delete ChromaDB collection '%s': %s",
+                self.collection_name,
+                exc,
+            )
+
     def index_documents(
         self, cv_text: str, job_description: str, company_overview: str
     ) -> None:
@@ -375,9 +393,11 @@ class PrepEngine:
 
     async def generate(self) -> Dict[str, Any]:
         """Build the prompt from retrieval context and generate the guide."""
-        cv = self._retrieve_all("candidate experience and skills")
-        jd = self._retrieve_all("job requirements and qualifications")
-        company = self._retrieve_all("company values and mission")
+        rag_start = time.perf_counter()
+        cv = self._retrieve_all("candidate experience and skills", source="cv")
+        jd = self._retrieve_all("job requirements and qualifications", source="jd")
+        company = self._retrieve_all("company values and mission", source="company")
+        logger.info("RAG retrieval took %.2fs", time.perf_counter() - rag_start)
 
         cv_facts = _facts_sheet(self.cv_text) or "Not provided."
 
@@ -399,12 +419,15 @@ class PrepEngine:
             {"role": "user", "content": context_block},
         ]
         if not settings.has_llm():
-            logger.warning("No LLM configured; returning fallback guide.")
-            return load_fallback_guide()
+            raise PrepGuideError(
+                "No LLM is configured. Add an API key to generate a CV-grounded "
+                "guide, or enable Fast Mode for a clearly labelled demo."
+            )
 
         last_error: Exception | None = None
         for attempt in range(1, settings.prep_retries + 1):
             try:
+                llm_start = time.perf_counter()
                 content = await asyncio.wait_for(
                     achat_completion(
                         messages,
@@ -413,6 +436,7 @@ class PrepEngine:
                     ),
                     timeout=settings.llm_timeout,
                 )
+                logger.info("LLM call took %.2fs", time.perf_counter() - llm_start)
                 logger.info(
                     "Prep LLM attempt %d/%d: received %d chars, starts=%r, "
                     "ends_with_brace=%s",
@@ -451,15 +475,14 @@ class PrepEngine:
                     len(guide.get("skill_gaps", [])),
                 )
                 return guide
-            except asyncio.TimeoutError:
+            except asyncio.TimeoutError as exc:
+                last_error = exc
                 logger.warning(
-                    "LLM call exceeded %.0fs timeout (attempt %d/%d); "
-                    "returning fallback guide.",
+                    "LLM call exceeded %.0fs timeout (attempt %d/%d); retrying.",
                     settings.llm_timeout,
                     attempt,
                     settings.prep_retries,
                 )
-                return load_fallback_guide()
             except Exception as exc:  # noqa: BLE001 - retry on any other failure
                 last_error = exc
                 logger.warning(
@@ -484,19 +507,21 @@ class PrepEngine:
                 ]
 
         logger.warning(
-            "Prep guide generation failed after %d attempts (%s); "
-            "returning fallback guide.",
+            "Prep guide generation failed after %d attempts (%s).",
             settings.prep_retries,
             last_error,
         )
-        return load_fallback_guide()
+        raise PrepGuideError(
+            f"LLM unavailable after {settings.prep_retries} attempts: {last_error}. "
+            "Retry later, or enable Fast Mode for a clearly labelled demo guide."
+        )
 
-    def _retrieve_all(self, query: str) -> str:
-        """Fetch a broad context window across sources for prompt injection."""
+    def _retrieve_all(self, query: str, source: str) -> str:
+        """Fetch a source-scoped context window for prompt injection."""
         embedder = get_embedder()
         collection = self._collection()
         try:
-            results = collection.get(limit=200)
+            results = collection.get(limit=200, where={"source": source})
         except Exception as exc:  # pragma: no cover
             logger.warning("Collection get failed: %s", exc)
             return ""
@@ -509,36 +534,3 @@ class PrepEngine:
             source = (meta or {}).get("source", "?")
             lines.append(f"[{source}] {doc}")
         return "\n".join(lines[:60])
-
-    @staticmethod
-    def _fallback_guide(context: str) -> Dict[str, Any]:
-        """Deterministic fallback guide when no LLM API key is configured."""
-        logger.warning("No OPENAI_API_KEY configured; returning fallback guide.")
-        sample_question = {
-            "question": (
-                "Tell me about a project where you overcame a significant challenge. "
-                "(Adjust this template based on your CV and the JD.)"
-            ),
-            "answer": (
-                "S: The project goals and context. T: My specific responsibility. "
-                "A: The concrete actions I took and decisions I made. R: The measurable "
-                "outcome and what I learned. Ground every element in a real example "
-                "from your CV."
-            ),
-        }
-        return {
-            "technical_questions": [sample_question] * 5,
-            "behavioral_questions": [sample_question] * 3,
-            "positioning_tips": [
-                "Map one quantifiable CV accomplishment to the company's flagship metric.",
-                "Mirror the company's vocabulary from its mission and job posting.",
-                "Prepare 2 questions that reference specifics from the company overview.",
-                "Front-load the skills the JD repeats most often.",
-                "Ask about the team's definition of success for this role in your first 90 days.",
-            ],
-            "skill_gaps": [
-                "Compare the JD's required skills against your CV; list anything missing, "
-                "and prepare a learning roadmap for each."
-            ],
-            "_fallback": True,
-        }

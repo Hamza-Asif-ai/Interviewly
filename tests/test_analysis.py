@@ -68,7 +68,7 @@ class TestScoring:
 
     def test_weighted_combination(self) -> None:
         card = build_scorecard(**self._sample_metrics())
-        expected_content = round(max(0, min(10, (0.40 * 8 + 0.35 * 9 + 0.25 * 7) - min(3 / 12, 2.5))), 2)
+        expected_content = round(max(0, min(10, ((8 + 9 + 7) / 3) - min(3 / 12, 2.5))), 2)
         assert card["content_score"] == expected_content
         assert text_scorecard_within_range(card["content_score"])
         assert card["overall_score"] <= 10 and card["overall_score"] >= 0
