@@ -311,21 +311,20 @@ class PrepEngine:
         # Unique per-instantiation collection so repeated generation never
         # collides and no cleanup/delete is required.
         self.collection_name = f"prep_{session_id}_{uuid.uuid4().hex[:8]}"
+        self._chroma_client = chromadb.EphemeralClient()
         self.cv_text: str = ""
         self.job_description: str = ""
         self.company_overview: str = ""
 
     def _collection(self):
-        # Ephemeral: embeddings never hit persistent storage, and cleanup()
-        # removes the in-memory collection when the request finishes.
-        chroma_client = chromadb.EphemeralClient()
-        return chroma_client.get_or_create_collection(self.collection_name)
+        # One EphemeralClient per engine instance keeps indexing and retrieval
+        # in the same in-memory store, without touching persistent storage.
+        return self._chroma_client.get_or_create_collection(self.collection_name)
 
     def cleanup(self) -> None:
         """Delete this session's ChromaDB collection (best-effort)."""
         try:
-            chroma_client = chromadb.EphemeralClient()
-            chroma_client.delete_collection(self.collection_name)
+            self._chroma_client.delete_collection(self.collection_name)
             logger.info("Deleted ChromaDB collection '%s'.", self.collection_name)
         except Exception as exc:  # pragma: no cover - cleanup must never raise
             logger.warning(
@@ -396,9 +395,17 @@ class PrepEngine:
     async def generate(self) -> Dict[str, Any]:
         """Build the prompt from retrieval context and generate the guide."""
         rag_start = time.perf_counter()
-        cv = self._retrieve_all("candidate experience and skills", source="cv")
-        jd = self._retrieve_all("job requirements and qualifications", source="jd")
-        company = self._retrieve_all("company values and mission", source="company")
+        cv, jd, company = await asyncio.gather(
+            asyncio.to_thread(
+                self._retrieve_all, "candidate experience and skills", source="cv"
+            ),
+            asyncio.to_thread(
+                self._retrieve_all, "job requirements and qualifications", source="jd"
+            ),
+            asyncio.to_thread(
+                self._retrieve_all, "company values and mission", source="company"
+            ),
+        )
         logger.info("RAG retrieval took %.2fs", time.perf_counter() - rag_start)
 
         cv_facts = _facts_sheet(self.cv_text) or "Not provided."
@@ -430,13 +437,12 @@ class PrepEngine:
         for attempt in range(1, settings.prep_retries + 1):
             try:
                 llm_start = time.perf_counter()
-                content = await asyncio.wait_for(
-                    achat_completion(
-                        messages,
-                        temperature=0.2,
-                        max_tokens=settings.prep_max_tokens,
-                    ),
+                content = await achat_completion(
+                    messages,
+                    temperature=0.2,
+                    max_tokens=settings.prep_max_tokens,
                     timeout=settings.llm_timeout,
+                    total_timeout=settings.llm_total_timeout,
                 )
                 logger.info("LLM call took %.2fs", time.perf_counter() - llm_start)
                 logger.info(

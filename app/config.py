@@ -28,10 +28,19 @@ class Settings:
     def __init__(self) -> None:
         self.openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
         self.openai_base_url: str = os.getenv(
-            "OPENAI_BASE_URL", "https://api.openai.com/v1"
+            "OPENAI_BASE_URL",
+            "https://generativelanguage.googleapis.com/v1beta/openai/",
         )
-        self.llm_model: str = os.getenv("LLM_MODEL", "gpt-4o-mini")
+        self.llm_model: str = os.getenv("LLM_MODEL", "gemini-3.8-flash")
+        fallback_raw = os.getenv(
+            "LLM_MODEL_FALLBACKS",
+            "gemini-3.8-flash,gemini-3.6-flash,gemini-3.5-flash-lite",
+        )
+        self.llm_model_fallbacks: List[str] = [
+            m.strip() for m in fallback_raw.split(",") if m.strip()
+        ]
         self.llm_timeout: float = float(os.getenv("LLM_TIMEOUT", "25"))
+        self.llm_total_timeout: float = float(os.getenv("LLM_TOTAL_TIMEOUT", "75"))
         self.prep_max_tokens: int = int(os.getenv("PREP_MAX_TOKENS", "8192"))
         self.prep_retries: int = int(os.getenv("PREP_RETRIES", "2"))
         self.prep_fallback_path: str = os.getenv(

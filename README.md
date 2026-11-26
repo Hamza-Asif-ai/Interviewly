@@ -80,7 +80,7 @@ Generic question banks don't prepare anyone for a specific role at a specific co
 ### 1️⃣ Prep Engine
 **Input:** CV (PDF / DOCX / TXT) + Job Description + Company Overview
 
-**Pipeline:** the CV, JD, and company text are chunked, embedded, and stored in a fresh ChromaDB collection per request; retrieved context plus a section-labeled *"verified facts"* sheet parsed straight from the CV are handed to the LLM under a strict grounding prompt. The entire LLM call is bounded by a **60-second timeout**; if the model 404s (retired), is rate-limited, times out, or returns unusable JSON, the engine transparently falls back to `data/prep_guide_fallback.json` so the user still gets a polished guide instead of an error.
+**Pipeline:** the CV, JD, and company text are chunked, embedded, and stored in a fresh ChromaDB collection per request; retrieved context plus a section-labeled *"verified facts"* sheet parsed straight from the CV are handed to the LLM under a strict grounding prompt. The entire LLM call is bounded by a **25-second timeout**; if the model 404s (retired), is rate-limited, times out, or returns unusable JSON, the engine transparently falls back to `data/prep_guide_fallback.json` so the user still gets a polished guide instead of an error.
 
 **Output:** an exportable preparation guide containing:
 - **5 technical questions** tailored to the JD, each with a short STAR model answer (≤3 sentences)
@@ -125,7 +125,7 @@ CV (PDF/DOCX/TXT) → Text Extraction (pdfplumber → PyPDF2 fallback)
 → Section-Labeled "Verified Facts" Sheet (regex-repairs flattened two-column CV rows)
 → Chunk + Embed (Sentence-Transformers, @lru_cache loaded once) CV / JD / Company text
 → ChromaDB Retrieval (per-session collection)
-→ LLM Generation (60 s timeout, JSON-only, model-fallback chain, retry + auto-repair)
+→ LLM Generation (25 s timeout, JSON-only, model-fallback chain, retry + auto-repair)
 → Guide Validation (rejects empty/placeholder sections)
 → SQLite + PDF export   |   on timeout/failure → prep_guide_fallback.json
 ```
@@ -133,7 +133,7 @@ CV (PDF/DOCX/TXT) → Text Extraction (pdfplumber → PyPDF2 fallback)
 ### Practice Engine Pipeline:
 ```
 Video Upload → ffmpeg Audio Extraction (16 kHz mono WAV)
-→ ┌─ Whisper Transcription (local, Urdu-forced) → LLM clean-up/translation to English
+→ ┌─ Whisper Transcription (local, language auto-detected) → LLM clean-up/translation to English
    ├─ librosa Audio Analysis (speaking rate, pauses, pitch, clarity)      [parallel]
    └─ OpenCV + MediaPipe Video Analysis (face, eye contact, posture)     [parallel]
 → Weighted Scorecard (Content 40% / Speech 30% / Visual 30%)
@@ -149,26 +149,26 @@ Video Upload → ffmpeg Audio Extraction (16 kHz mono WAV)
 | Setting | Default | Why |
 |---|---|---|
 | `OPENAI_API_KEY` | — | Any OpenAI-compatible key (ships configured for Google Gemini's OpenAI-compatible endpoint) |
-| `OPENAI_BASE_URL` | `https://api.openai.com/v1` | Swap to Gemini's (or any provider's) OpenAI-compatible base URL |
-| `LLM_MODEL` | `gemini-2.0-flash` | Render env should set this; see **Model fallback** below |
-| `LLM_TIMEOUT` | `60` | Seconds before the Prep Engine abandons the LLM and serves the JSON fallback |
-| `PREP_MAX_TOKENS` | `8192` | Caps each LLM response; generous head-room so the reduced 5+3 guide never truncates |
+| `OPENAI_BASE_URL` | `https://generativelanguage.googleapis.com/v1beta/openai/` | Gemini's OpenAI-compatible endpoint (swap for another provider if needed) |
+| `LLM_MODEL` | `gemini-3.8-flash` | Primary model; Render env should set this; see **Model fallback** below |
+| `LLM_MODEL_FALLBACKS` | `gemini-3.8-flash,gemini-3.6-flash,gemini-3.5-flash-lite` | Comma-separated env-configurable fallback chain |
+| `LLM_TIMEOUT` | `25` | Per-model timeout in seconds |
+| `LLM_TOTAL_TIMEOUT` | `75` | Total budget across all fallback models in one call |
+| `PREP_MAX_TOKENS` | `8192` | Caps each LLM response, including JSON-repair retries |
 | `PREP_RETRIES` | `2` | Full regeneration attempts if the model returns invalid/truncated JSON |
 
 #### Model fallback chain
 `app/services/llm.py` strips any `models/` prefix and tries candidates in order until one returns content:
-1. `gemini-2.0-flash` (the configured default)
-2. `gemini-2.5-flash`
-3. `gemini-1.5-flash-latest`
-4. `gemini-1.5-pro-latest`
-5. `gemini-flash-latest` (verified on new accounts where the 1.5/2.x line is retired)
+1. `LLM_MODEL` (primary)
+2. `LLM_MODEL_FALLBACKS` in the order supplied by the environment
 
-If **every** candidate fails, the Prep Engine returns `data/prep_guide_fallback.json` rather than an error.
+Model names were checked against Google's official Models page. On Render, update `LLM_MODEL` to a currently available model rather than a retired 1.5/2.x name. If **every** candidate fails, the API returns `503` with instructions to enable Fast Mode; it never silently substitutes guide data.
 
 ### Speech (`app/services/transcription.py`, `audio_analysis.py`)
 | Setting | Default | Why |
 |---|---|---|
 | `WHISPER_MODEL` | `small` | Local Whisper model size — `base` for speed, `medium` for accuracy |
+| `WHISPER_LANG` | (auto) | Force a Whisper language code (e.g. `en`, `ur`); empty = auto-detect |
 | `WHISPER_API_ENABLED` | `false` | When `true`, skips the local model and uses the Whisper API directly |
 | VAD threshold | 30th-percentile RMS × 0.6 | Separates voiced speech from silence without a video-dependent noise floor |
 | `pyin` pitch range | 50–500 Hz | Human speaking-voice fundamental-frequency range |
@@ -183,7 +183,7 @@ If **every** candidate fails, the Prep Engine returns `data/prep_guide_fallback.
 ### Uploads
 | Setting | Default | Why |
 |---|---|---|
-| `MAX_UPLOAD_MB` | 200 | Caps CV and video upload size; streamed to disk in chunks |
+| `MAX_UPLOAD_MB` | 50 | Caps CV and video upload size; larger uploads get HTTP 413. Streamed to disk in chunks |
 | Allowed CV types | `.pdf .docx .doc .txt` | — |
 | Allowed video types | `.mp4 .mov .avi .mkv .webm` | — |
 
@@ -234,7 +234,7 @@ pytest tests/ -v
               │                                      │
       /prep/generate, /prep/{id}          /practice/upload, /practice/{id}/report
               │                                      │
-      PrepEngine (RAG + LLM, 60 s         Transcription + Audio + Video analysis
+      PrepEngine (RAG + LLM, 25 s         Transcription + Audio + Video analysis
       timeout → fallback JSON)                      │
               │                                      │
       ChromaDB (embeddings)                 Whisper · librosa · MediaPipe
@@ -353,19 +353,18 @@ interviewly/
 - **Clarity/speech scores look off** — the heuristic bands (120–180 WPM, 0.15–0.35 pause ratio, 20–80 Hz pitch std) in `audio_analysis.py` assume one clear speaker near the mic; noisy recordings shift the VAD threshold.
 - **Eye-contact % too strict/lenient** — adjust `EYE_CONTACT_YAW_CONE` / `EYE_CONTACT_PITCH_CONE` in `video_analysis.py` for your camera framing.
 - **LLM output too slow on Render's free tier** — cut `PREP_MAX_TOKENS`, tighten `LLM_TIMEOUT`, or switch the demo to Fast Mode.
-- **Non-English or mixed-language answers** — Whisper is forced to `language="ur"`; adjust the language heuristic in `transcription.py` for a purely English test set.
+- **Non-English or mixed-language answers** — Whisper auto-detects the language; set `WHISPER_LANG` (e.g. `en` or `ur`) to force one for a single-language test set.
 
 ---
 
 ## ⚠️ Known Limitations
 
-- **Speaking rate is a heuristic.** `speaking_rate_wpm` scales an assumed 140 WPM baseline by the voiced-audio fraction rather than aligning to transcribed words — an approximation, not ground truth.
+- **Speaking rate depends on transcription.** `speaking_rate_wpm` divides the transcribed word count by the voiced-audio time (sum of voiced segments), so an empty or garbled transcript skews it; it still relies on the RMS-energy VAD to find voiced segments.
 - **Heuristic scoring is coarser than the LLM path.** Without an API key, STAR/relevance/conciseness use keyword matching rather than LLM grading.
 - **Single-speaker, front-facing assumption.** Visual analysis is tuned for one candidate mostly facing the camera; multiple faces or occlusion reduce accuracy.
 - **Privacy-first means no replay.** Practice videos and extracted audio are deleted immediately after analysis; only the scorecard and transcript remain.
-- **ChromaDB collections aren't cleaned up.** Each prep generation creates a uniquely-named collection that is never deleted, so `data/chroma/` grows with usage.
-- **Gemini free-tier quota is small.** Google's free tier bills per-model daily (e.g. 20 requests/day for `gemini-flash-latest`); heavy demos can hit `429`. A paid key or the JSON fallback avoids this.
-- **PDF export is latin-1 only.** `sanitize_pdf_text()` transliterates or drops characters fpdf2's core fonts can't render; non-Latin scripts show fine in the web UI but not in the exported PDF.
+- **Gemini free-tier quota is small.** Google's free tier bills per-model daily; heavy demos can hit `429`. Use a paid key, or Fast Mode for an explicitly labelled demo.
+- **PDF export uses Unicode fonts.** Section F adds Noto Naskh Arabic for Urdu/RTL text; scanned PDFs require OCR and are reported clearly.
 
 ---
 
@@ -373,10 +372,10 @@ interviewly/
 
 | Problem | Solution |
 |---|---|
-| `404 NOT_FOUND` for `gemini-1.5-flash` / `gemini-2.0-flash` | Models are retired for new accounts. The app auto-shifts through the fallback chain to `gemini-flash-latest`; no action needed. |
-| Response takes 3–4 minutes | The LLM fell back across several retired models. Set `LLM_TIMEOUT=20–30`, reduce `PREP_RETRIES`, and use Fast Mode for demos. |
-| `429 RESOURCE_EXHAUSTED` from Gemini | Free-tier daily quota exhausted. Use a paid key, or let the JSON fallback serve the guide. |
-| Prep guide always shows the cached "ACME Analytics" answers | The LLM failed (404/429/timeout) and the JSON fallback fired. Check `server.log` for the real cause. |
+| `404 NOT_FOUND` for a Gemini model | The name may be retired for your account. Set `LLM_MODEL` to a current model from Google's Models page and update `LLM_MODEL_FALLBACKS`. |
+| Response takes too long | Each model is capped by `LLM_TIMEOUT`; the call budget is `LLM_TOTAL_TIMEOUT`. Reduce those values, `PREP_RETRIES`, or use Fast Mode for demos. |
+| `429 RESOURCE_EXHAUSTED` from Gemini | Free-tier daily quota exhausted. Use a paid key, a different model, or Fast Mode for an explicitly labelled demo. |
+| Prep guide shows "DEMO DATA - not based on your CV or the job description." | Fast Mode was enabled or the LLM was unavailable; no silent fallback occurs. Check `server.log` for the real cause. |
 | `pkg_resources` / setuptools error on install | `pip install "setuptools<82"` before installing `openai-whisper`. |
 | `ffmpeg not found` | App auto-falls back to bundled `imageio-ffmpeg`; otherwise `apt-get install ffmpeg`. |
 | Empty or garbled transcript | Confirm `WHISPER_MODEL` finished downloading and audio isn't silent; set `WHISPER_API_ENABLED=true`. |
@@ -406,4 +405,4 @@ BS Artificial Intelligence — DUET, Karachi
 
 ---
 
-> **Render environment variables** — on your Render Web Service, set: `OPENAI_API_KEY`, `OPENAI_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai/`, `LLM_MODEL=gemini-2.0-flash` (fallbacks are automatic), `LLM_TIMEOUT=60`, `PREP_RETRIES=2`, `PREP_MAX_TOKENS=8192`, `WHISPER_MODEL=small`, `WHISPER_API_ENABLED=false`, `MAX_UPLOAD_MB=200`, `PORT` (Render injects it).
+> **Render environment variables** — on your Render Web Service, set: `OPENAI_API_KEY`, `OPENAI_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai/`, `LLM_MODEL=gemini-3.8-flash` (update if Google retires it), `LLM_MODEL_FALLBACKS=gemini-3.8-flash,gemini-3.6-flash,gemini-3.5-flash-lite`, `LLM_TIMEOUT=25`, `LLM_TOTAL_TIMEOUT=75`, `PREP_RETRIES=2`, `PREP_MAX_TOKENS=8192`, `WHISPER_MODEL=small`, `WHISPER_LANG=` (auto-detect), `WHISPER_API_ENABLED=false`, `MAX_UPLOAD_MB=50`, `PORT` (Render injects it).

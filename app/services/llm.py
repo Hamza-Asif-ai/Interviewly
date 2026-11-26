@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from typing import Any, Dict, List
 
 from openai import AsyncOpenAI, OpenAI
@@ -13,16 +14,6 @@ from ..config import settings
 logger = logging.getLogger(__name__)
 
 _CACHED_CLIENT: OpenAI | None = None
-_CACHED_ASYNC_CLIENT: AsyncOpenAI | None = None
-
-MODEL_FALLBACKS: List[str] = [
-    "gemini-2.0-flash",
-    "gemini-2.5-flash",
-    "gemini-1.5-flash-latest",
-    "gemini-1.5-pro-latest",
-    # Verified to serve content on new accounts if every 1.5/2.x is retired.
-    "gemini-flash-latest",
-]
 
 _WORKING_MODEL: str | None = None
 
@@ -47,7 +38,7 @@ def _model_candidates(preferred: str | None) -> List[str]:
             normalized = _normalize_model(raw)
             if normalized and normalized not in candidates:
                 candidates.append(normalized)
-    for fallback in MODEL_FALLBACKS:
+    for fallback in settings.llm_model_fallbacks:
         normalized = _normalize_model(fallback)
         if normalized not in candidates:
             candidates.append(normalized)
@@ -77,23 +68,13 @@ def get_client() -> OpenAI:
     return _CACHED_CLIENT
 
 
-def get_async_client() -> AsyncOpenAI:
-    """Return a cached asynchronous OpenAI-compatible client."""
-    global _CACHED_ASYNC_CLIENT
-    if _CACHED_ASYNC_CLIENT is None:
-        _CACHED_ASYNC_CLIENT = AsyncOpenAI(
-            api_key=settings.openai_api_key or "dummy",
-            base_url=settings.openai_base_url,
-        )
-    return _CACHED_ASYNC_CLIENT
-
-
 def chat_completion(
     messages: List[Dict[str, str]],
     model: str | None = None,
     temperature: float = 0.2,
     max_tokens: int = 4096,
     timeout: float | None = None,
+    total_timeout: float | None = None,
 ) -> str:
     """Run a chat completion synchronously and return the message content.
 
@@ -106,14 +87,22 @@ def chat_completion(
     last_error: Exception | None = None
     last_empty: str | None = None
     per_request_timeout = timeout if timeout is not None else settings.llm_timeout
+    budget = (
+        total_timeout if total_timeout is not None else settings.llm_total_timeout
+    )
+    deadline = time.monotonic() + budget
     for candidate in candidates:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            last_error = TimeoutError("LLM total timeout reached before a response.")
+            break
         try:
             response = client.chat.completions.create(
                 model=candidate,
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
-                timeout=per_request_timeout,
+                timeout=min(per_request_timeout, remaining),
             )
             content = response.choices[0].message.content or ""
             if content:
@@ -136,22 +125,38 @@ async def achat_completion(
     temperature: float = 0.2,
     max_tokens: int = 4096,
     timeout: float | None = None,
+    total_timeout: float | None = None,
 ) -> str:
-    """Run a chat completion asynchronously and return the message content."""
-    client = get_async_client()
+    """Run a chat completion asynchronously and return the message content.
+
+    A fresh client is created per call: caching AsyncOpenAI across Gradio's
+    per-click event loops reuses a closed HTTP session.
+    """
+    client = AsyncOpenAI(
+        api_key=settings.openai_api_key or "dummy",
+        base_url=settings.openai_base_url,
+    )
     candidates = _model_candidates(model or settings.llm_model)
     primary = candidates[0]
     last_error: Exception | None = None
     last_empty: str | None = None
     per_request_timeout = timeout if timeout is not None else settings.llm_timeout
+    budget = (
+        total_timeout if total_timeout is not None else settings.llm_total_timeout
+    )
+    deadline = time.monotonic() + budget
     for candidate in candidates:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            last_error = TimeoutError("LLM total timeout reached before a response.")
+            break
         try:
             response = await client.chat.completions.create(
                 model=candidate,
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
-                timeout=per_request_timeout,
+                timeout=min(per_request_timeout, remaining),
             )
             content = response.choices[0].message.content or ""
             if content:
@@ -230,7 +235,7 @@ async def extract_faithful_json(content: str) -> Any:
             },
         ]
         repaired = await achat_completion(
-            messages, temperature=0.0, max_tokens=4096
+            messages, temperature=0.0, max_tokens=settings.prep_max_tokens
         )
         if not repaired or not repaired.strip():
             raise ValueError(

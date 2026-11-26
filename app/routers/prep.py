@@ -72,11 +72,8 @@ async def generate_prep_guide(
         if os.path.exists(saved_path):
             os.remove(saved_path)  # CV text is embedded; raw file not retained
 
-    session = DBSession(title="Prep session")
-    db.add(session)
-    db.flush()  # obtain session.id
-
-    engine = PrepEngine(str(session.id))
+    engine_session_id = uuid.uuid4().hex
+    engine = PrepEngine(engine_session_id)
     try:
         if fast_mode:
             logger.info("Fast Mode: serving clearly labelled demo prep guide.")
@@ -108,6 +105,11 @@ async def generate_prep_guide(
 
     guide_json = json.dumps(guide_data)
     access_token = secrets.token_urlsafe(24)
+    # One short transaction after generation: no DB row is held open while
+    # embeddings or the LLM are running.
+    session = DBSession(title="Prep session")
+    db.add(session)
+    db.flush()  # obtain session.id
     guide = PrepGuideModel(
         session_id=session.id,
         cv_filename=cv_file.filename or "cv",
