@@ -49,5 +49,6 @@
     "No statistical modelling / forecasting skills are listed — mention it as an area you are actively learning.",
     "Direct experience with product analytics tools (Amplitude, Mixpanel) is absent — frame what you would do differently if asked."
   ],
-  "_fallback": true
+  "_fallback": true,
+  "scoring_mode": "demo"
 }

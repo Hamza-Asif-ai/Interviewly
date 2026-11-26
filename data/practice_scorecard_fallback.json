@@ -12,10 +12,13 @@
       "filler_words_per_minute": 6.8,
       "conciseness_score": 7.7,
       "star_score": 7.5,
-      "relevance_score": 7.2
+      "relevance_score": 7.2,
+      "scoring_mode": "demo"
     },
     "speech_metrics": {
       "speaking_rate_wpm": 138.0,
+      "words_per_minute": 138.0,
+      "pause_count": 12,
       "pause_ratio": 0.22,
       "pitch_mean_hz": 148.0,
       "pitch_std_hz": 52.0,
@@ -31,6 +34,7 @@
     }
   },
   "review": {
+    "scoring_mode": "demo",
     "strengths": [
       "Clear STAR structure: the answer moves naturally through Situation, Task, Action and Result.",
       "Strong eye contact and stable posture keep the interviewer engaged throughout.",

@@ -245,14 +245,27 @@ def _metrics_table(scorecard: Dict[str, Any]) -> List[List[Any]]:
     }
     for category, metrics in groups.items():
         for key, value in metrics.items():
-            rows.append([category, key.replace("_", " ").title(), value])
-    rows.extend(
-        [
-            ["Score", "Content", scorecard.get("content_score")],
-            ["Score", "Speech", scorecard.get("speech_score")],
-            ["Score", "Visual", scorecard.get("visual_score")],
-        ]
+            if isinstance(value, dict):
+                for subkey, subvalue in value.items():
+                    if subvalue is not None:
+                        label = f"{key.replace('_', ' ').title()}: {subkey.replace('_', ' ').title()}"
+                        rows.append([category, label, subvalue])
+            elif value is not None:
+                rows.append([category, key.replace("_", " ").title(), value])
+    scoring_mode = scorecard.get("scoring_mode") or (
+        scorecard.get("text_metrics", {}).get("scoring_mode")
     )
+    if scoring_mode:
+        rows.append(["Score", "Scoring Mode", scoring_mode])
+    for label, key in (
+        ("Content", "content_score"),
+        ("Speech", "speech_score"),
+        ("Visual", "visual_score"),
+        ("Overall", "overall_score"),
+    ):
+        rows.append(
+            ["Score", label, scorecard.get(key) if scorecard.get(key) is not None else "Not available"]
+        )
     return rows
 
 
@@ -268,6 +281,7 @@ def _render_practice(
     scorecard: Dict[str, Any],
     review: Dict[str, Any],
     transcript: str,
+    demo: bool = False,
 ) -> tuple:
     """Render a scorecard into the Practice tab's output widgets."""
     content_score = scorecard.get("content_score", 0)
@@ -275,7 +289,11 @@ def _render_practice(
     visual_score = scorecard.get("visual_score", 0)
     overall_score = scorecard.get("overall_score", 0)
 
-    review_md = "## Strengths\n" + "\n".join(
+    banner = (
+        "> **DEMO DATA - not based on your video or transcript.**\n\n"
+        if demo else ""
+    )
+    review_md = banner + "## Strengths\n" + "\n".join(
         f"- {s}" for s in review.get("strengths", [])
     )
     review_md += "\n\n## Weaknesses\n" + "\n".join(
@@ -285,11 +303,19 @@ def _render_practice(
         f"- {t}" for t in review.get("improvement_tips", [])
     )
 
+    direction = (
+        "rtl" if any("\u0600" <= ch <= "\u06ff" for ch in transcript) else "ltr"
+    )
+    alignment = "right" if direction == "rtl" else "left"
     transcript_md = (
-        f"## Transcript\n\n<div dir='ltr' style='text-align:left'>> {transcript}</div>"
+        f"## Transcript\n\n<div dir='{direction}' style='text-align:{alignment}'>> {transcript}</div>"
         if transcript.strip() else
         "## Transcript\n\n_No transcript detected — is audio present in the video?_"
     )
+    if visual_score is None:
+        transcript_md += (
+            "\n\n_Visual metrics unavailable: face detection was too low._"
+        )
 
     return (
         content_score,
@@ -314,7 +340,9 @@ def _analyze_practice_handler(
     if fast_mode:
         logger.info("Practice Engine: Fast Mode ON - serving cached scorecard.")
         data = _load_practice_fallback()
-        return _render_practice(data["scorecard"], data["review"], data["transcript"])
+        return _render_practice(
+            data["scorecard"], data["review"], data["transcript"], demo=True
+        )
 
     if video is None or not os.path.exists(video):
         raise gr.Error("Please upload or record a practice video.")
