@@ -12,10 +12,12 @@ import warnings
 from functools import lru_cache
 from typing import Any, Dict, List
 
+from pydantic import ValidationError
 from sentence_transformers import SentenceTransformer
 import chromadb
 
 from ..config import settings
+from ..schemas import GeneratedPrepGuide
 from .llm import achat_completion, extract_faithful_json
 
 warnings.filterwarnings("ignore")
@@ -263,6 +265,9 @@ def validate_guide(guide: Any) -> Dict[str, Any]:
         "no candidate cv",
         "no company",
         "none provided",
+        "acme analytics",
+        "lorem ipsum",
+        "tbd",
     )
 
     def _real(text: Any) -> bool:
@@ -281,15 +286,28 @@ def validate_guide(guide: Any) -> Dict[str, Any]:
                 real_count += 1
             elif isinstance(item, str) and _real(item):
                 real_count += 1
-        if real_count == 0:
-            raise ValueError(f"Guide section '{key}' contains no real questions/answers.")
+        if real_count != len(items):
+            raise ValueError(
+                f"Guide section '{key}' contains placeholders or empty content."
+            )
 
     for key in ("positioning_tips", "skill_gaps"):
         items = guide.get(key, [])
-        if not any(_real(item) for item in items):
-            raise ValueError(f"Guide section '{key}' is empty or contains only placeholders.")
+        if not all(_real(item) for item in items) or not items:
+            raise ValueError(f"Guide section '{key}' is empty or contains placeholders.")
 
-    return guide
+    try:
+        validated = GeneratedPrepGuide.model_validate(guide)
+    except ValidationError as exc:
+        raise ValueError(
+            "Guide must contain exactly 5 technical questions, 3 behavioral "
+            "questions, 5 positioning tips and 5 skill gaps (got "
+            f"{len(guide.get('technical_questions', []))} technical, "
+            f"{len(guide.get('behavioral_questions', []))} behavioral, "
+            f"{len(guide.get('positioning_tips', []))} tips, "
+            f"{len(guide.get('skill_gaps', []))} gaps)."
+        ) from exc
+    return validated.model_dump()
 
 
 @lru_cache(maxsize=1)
@@ -525,20 +543,24 @@ class PrepEngine:
         )
 
     def _retrieve_all(self, query: str, source: str) -> str:
-        """Fetch a source-scoped context window for prompt injection."""
-        embedder = get_embedder()
+        """Fetch a bounded, source-scoped context window for prompt injection."""
         collection = self._collection()
         try:
-            results = collection.get(limit=200, where={"source": source})
+            results = collection.get(
+                limit=settings.rag_max_chunks, where={"source": source}
+            )
         except Exception as exc:  # pragma: no cover
             logger.warning("Collection get failed: %s", exc)
             return ""
         docs = results.get("documents") or []
         metas = results.get("metadatas") or []
-        if not docs:
-            return ""
-        lines = []
+        lines: List[str] = []
+        used = 0
         for doc, meta in zip(docs, metas):
-            source = (meta or {}).get("source", "?")
-            lines.append(f"[{source}] {doc}")
-        return "\n".join(lines[:60])
+            label = (meta or {}).get("source", source)
+            line = f"[{label}] {doc}"
+            if used + len(line) > settings.rag_context_chars:
+                break
+            lines.append(line)
+            used += len(line) + 1
+        return "\n".join(lines)

@@ -30,7 +30,15 @@ def extract_text_from_pdf(file_path: str) -> str:
             reader = PdfReader(file_path)
             text = "\n".join(page.extract_text() or "" for page in reader.pages)
         except Exception as inner_exc:
-            raise CVParseError(f"Could not parse PDF: {inner_exc}") from inner_exc
+            raise CVParseError(
+                "Could not parse PDF. It may be password-protected or scanned "
+                "(image-only); export a text-based PDF or run OCR first."
+            ) from inner_exc
+    if not text.strip():
+        raise CVParseError(
+            "No extractable text found in PDF. It may be scanned (image-only); "
+            "run OCR first."
+        )
     return text.strip()
 
 
@@ -65,9 +73,13 @@ def extract_text_from_file(file_path: str) -> str:
         text = extract_text_from_docx(file_path)
     elif suffix == ".txt":
         text = Path(file_path).read_text(encoding="utf-8", errors="ignore")
+    elif suffix == ".doc":
+        raise CVParseError(
+            "Legacy .doc files are not supported; save as .docx or .pdf first."
+        )
     else:
         raise CVParseError(f"Unsupported CV file type: {suffix}")
 
-    if not text:
+    if not text or not text.strip():
         raise CVParseError("No extractable text found in the CV file.")
-    return text
+    return text.strip()

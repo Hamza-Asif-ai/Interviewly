@@ -83,7 +83,7 @@ def _cleanup(paths) -> None:
 @router.post("/upload")
 async def upload_practice_video(
     video_file: UploadFile = File(...),
-    question_prompt: str = Form(default=""),
+    question_prompt: str = Form(default="", max_length=settings.max_input_chars),
     db: Session = Depends(get_db),
 ) -> dict:
     """Analyze a practice video and return a full diagnostic scorecard."""

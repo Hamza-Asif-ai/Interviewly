@@ -17,8 +17,8 @@ class PrepGenerateRequest(BaseModel):
 class Question(BaseModel):
     """A single interview question with its STAR-format model answer."""
 
-    question: str
-    answer: str
+    question: str = Field(min_length=1)
+    answer: str = Field(min_length=1)
 
 
 class PrepGuide(BaseModel):
@@ -28,6 +28,15 @@ class PrepGuide(BaseModel):
     behavioral_questions: List[Question]
     positioning_tips: List[str]
     skill_gaps: List[str]
+
+
+class GeneratedPrepGuide(BaseModel):
+    """Strict shape enforced on LLM-generated guides."""
+
+    technical_questions: List[Question] = Field(min_length=5, max_length=5)
+    behavioral_questions: List[Question] = Field(min_length=3, max_length=3)
+    positioning_tips: List[str] = Field(min_length=5, max_length=5)
+    skill_gaps: List[str] = Field(min_length=5, max_length=5)
 
 
 class PrepGuideResponse(BaseModel):

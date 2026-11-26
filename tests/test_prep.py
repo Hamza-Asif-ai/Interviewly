@@ -170,11 +170,11 @@ class TestPDFExport:
             "skill_gaps": ["\u00c9l\u00e9ments Docker are missing \u2026"],
         }
 
-    def test_sanitize_keeps_latin1_within_bounds(self) -> None:
+    def test_sanitize_keeps_unicode_text(self) -> None:
         text = "caf\u00e9 \u266f \u2014 \u2018quotes\u2019 \u2022 bullet \u2605 \U0001f600"
         out = sanitize_pdf_text(text)
-        assert "caf" in out
-        assert all(ord(ch) <= 0xFF for ch in out)
+        assert "caf\u00e9" in out
+        assert "?" not in out
 
     def test_sanitize_maps_smart_punctuation(self) -> None:
         assert sanitize_pdf_text("\u201cquoted\u201d") == '"quoted"'

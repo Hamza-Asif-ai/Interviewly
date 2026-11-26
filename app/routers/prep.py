@@ -49,8 +49,12 @@ async def _save_upload(file: UploadFile, extension: str) -> str:
 @router.post("/generate", response_model=PrepGuideResponse)
 async def generate_prep_guide(
     cv_file: UploadFile = File(...),
-    job_description: str = Form(..., min_length=1),
-    company_overview: str = Form(default=""),
+    job_description: str = Form(
+        ..., min_length=1, max_length=settings.max_input_chars
+    ),
+    company_overview: str = Form(
+        default="", max_length=settings.max_input_chars
+    ),
     fast_mode: bool = Form(default=False),
     db: Session = Depends(get_db),
 ) -> PrepGuideResponse:
@@ -71,6 +75,12 @@ async def generate_prep_guide(
     finally:
         if os.path.exists(saved_path):
             os.remove(saved_path)  # CV text is embedded; raw file not retained
+
+    if len(cv_text) > settings.max_input_chars:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Extracted CV text exceeds {settings.max_input_chars} characters.",
+        )
 
     engine_session_id = uuid.uuid4().hex
     engine = PrepEngine(engine_session_id)

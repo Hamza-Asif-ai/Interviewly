@@ -55,6 +55,9 @@ class Settings:
         self.whisper_lang: str = os.getenv("WHISPER_LANG", "").strip()
         self.max_upload_mb: int = int(os.getenv("MAX_UPLOAD_MB", "50"))
         self.max_upload_bytes: int = self.max_upload_mb * 1024 * 1024
+        self.max_input_chars: int = int(os.getenv("MAX_INPUT_CHARS", "20000"))
+        self.rag_context_chars: int = int(os.getenv("RAG_CONTEXT_CHARS", "4000"))
+        self.rag_max_chunks: int = int(os.getenv("RAG_MAX_CHUNKS", "8"))
         self.pdf_ttl_hours: int = int(os.getenv("PDF_TTL_HOURS", "48"))
         self.rate_limit_per_minute: int = int(os.getenv("RATE_LIMIT_PER_MINUTE", "20"))
         self.max_concurrent_analyses: int = int(
