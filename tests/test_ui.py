@@ -6,8 +6,12 @@ import json
 import sys
 from pathlib import Path
 
+import gradio as gr
+import pytest
+
 sys.path.insert(0, ".")
 
+from app.config import settings  # noqa: E402
 from app.ui import gradio_app  # noqa: E402
 
 
@@ -62,3 +66,16 @@ def test_transcript_direction_and_demo_banner() -> None:
     transcript_md = rendered[6]
     assert "DEMO DATA" in review_md
     assert "dir='rtl'" in transcript_md
+
+
+def test_prep_handler_rejects_oversized_cv_text(tmp_path, monkeypatch) -> None:
+    cv_path = tmp_path / "cv.txt"
+    cv_path.write_text("x", encoding="utf-8")
+    monkeypatch.setattr(
+        gradio_app,
+        "extract_text_from_file",
+        lambda _path: "x" * (settings.max_input_chars + 1),
+    )
+
+    with pytest.raises(gr.Error, match="Extracted CV text exceeds"):
+        gradio_app._generate_prep_handler(str(cv_path), "Backend engineer", "", False)

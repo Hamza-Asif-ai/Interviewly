@@ -157,6 +157,19 @@ def _generate_prep_handler(
         except CVParseError as exc:
             raise gr.Error(f"Could not parse CV: {exc}") from exc
 
+        if len(cv_text) > settings.max_input_chars:
+            raise gr.Error(
+                f"Extracted CV text exceeds {settings.max_input_chars} characters."
+            )
+        if len(job_description) > settings.max_input_chars:
+            raise gr.Error(
+                f"Job description exceeds {settings.max_input_chars} characters."
+            )
+        if len(company_overview) > settings.max_input_chars:
+            raise gr.Error(
+                f"Company overview exceeds {settings.max_input_chars} characters."
+            )
+
         db = SessionLocal()
         try:
             session = DBSession(title="Prep session")
