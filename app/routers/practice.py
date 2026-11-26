@@ -33,6 +33,7 @@ router = APIRouter(prefix="/practice", tags=["practice"])
 
 VIDEO_EXTENSIONS = (".mp4", ".mov", ".avi", ".mkv", ".webm")
 MIN_TRANSCRIPT_WORDS = 3
+SUPPORTED_LANGUAGES = {"", "en", "ur"}
 
 _FORMAT_HINTS = {
     ".mp4": ("mp4", "mov"),
@@ -84,9 +85,14 @@ def _cleanup(paths) -> None:
 async def upload_practice_video(
     video_file: UploadFile = File(...),
     question_prompt: str = Form(default="", max_length=settings.max_input_chars),
+    language: str = Form(default=""),
     db: Session = Depends(get_db),
 ) -> dict:
     """Analyze a practice video and return a full diagnostic scorecard."""
+    if language not in SUPPORTED_LANGUAGES:
+        raise HTTPException(
+            status_code=422, detail="language must be empty, 'en' or 'ur'."
+        )
     extension = os.path.splitext(video_file.filename or "")[1].lower()
     if extension not in VIDEO_EXTENSIONS:
         raise HTTPException(
@@ -122,7 +128,7 @@ async def upload_practice_video(
         await run_in_threadpool(extract_audio_from_video, video_path, audio_path)
         duration = await _probe_duration(audio_path)
 
-        transcript = await run_in_threadpool(transcribe_audio, audio_path)
+        transcript = await run_in_threadpool(transcribe_audio, audio_path, language)
         if len(transcript.split()) < MIN_TRANSCRIPT_WORDS:
             raise HTTPException(
                 status_code=422,

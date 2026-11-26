@@ -25,7 +25,8 @@ FILLER_WORDS: Dict[str, int] = {
 }
 
 _PLAIN_FILLER_RE = re.compile(
-    r"(?<!\w)(?:um|uh|erm|hmm|basically|literally|actually|matlab|yaani|you[\s_-]+know)(?!\w)",
+    r"(?<!\w)(?:um|uh|erm|hmm|basically|literally|actually|matlab|yaani|"
+    r"مطلب|یعنی|you[\s_-]+know)(?!\w)",
     re.IGNORECASE,
 )
 _LIKE_FILLER_RE = re.compile(
@@ -57,6 +58,8 @@ def _count_filler_words(text: str) -> Tuple[int, Dict[str, int]]:
     followed by 'I mean'/'you know'), not as the verb in 'I like Python'.
     """
     normalized = re.sub(r"you[\s_-]+know", "you_know", text, flags=re.IGNORECASE)
+    normalized = re.sub(r"یعنی(?:\s+کہ)?", "yaani", normalized)
+    normalized = re.sub(r"مطلب(?:\s+کی)?", "matlab", normalized)
     result = dict(FILLER_WORDS)
     for match in _PLAIN_FILLER_RE.finditer(normalized):
         word = re.sub(r"\s+", "_", match.group(0).lower())

@@ -192,96 +192,93 @@ def _ensure_ffmpeg_on_path() -> None:
         logger.debug("Could not stage bundled ffmpeg: %s", exc)
 
 
-def _transcribe_local(audio_path: str) -> str:
-    """Transcribe using local openai-whisper.
-
-    Language is auto-detected by default; set WHISPER_LANG to force one.
-    """
-    _ensure_ffmpeg_on_path()  # whisper reads AUDIO_TOOLS_FFMPEG at import time
+def _transcribe_local(audio_path: str, language: str | None = None) -> tuple[str, str]:
+    """Transcribe with local Whisper and return (text, detected language)."""
+    _ensure_ffmpeg_on_path()
     model = _load_local_model()
-    if settings.whisper_lang:
-        result = model.transcribe(audio_path, language=settings.whisper_lang)
-    else:
-        result = model.transcribe(audio_path)
-    return (result.get("text") or "").strip()
+    lang = (language or settings.whisper_lang or "").strip()
+    kwargs = {"language": lang} if lang else {}
+    result = model.transcribe(audio_path, **kwargs)
+    text = (result.get("text") or "").strip()
+    detected = (result.get("language") or lang or "").strip()
+    return text, detected
 
 
-def _transcribe_api(audio_path: str) -> str:
+def _transcribe_api(audio_path: str, language: str | None = None) -> str:
     """Transcribe using the OpenAI Whisper API."""
     from .llm import get_client
 
     client = get_client()
+    lang = (language or settings.whisper_lang or "").strip()
+    kwargs = {"language": lang} if lang else {}
     with open(audio_path, "rb") as audio_file:
         response = client.audio.transcriptions.create(
             model="whisper-1",
             file=audio_file,
+            **kwargs,
         )
     return getattr(response, "text", "") or ""
 
 
-def urdu_to_english(text: str) -> str:
-    """Translate Urdu script text to clean English using the configured LLM.
-
-    Whisper transcription of Urdu speech is often garbled, so the LLM is asked
-    to understand the intended meaning from context and produce a clean,
-    natural English translation. Falls back to the original text if the LLM is
-    unavailable or fails.
-    """
+def translate_to_english(text: str, source_lang: str = "") -> str:
+    """Translate a non-English transcript into clean English for analysis."""
     if not text or not text.strip():
         return text
+    lang = (source_lang or "").strip()
+    if lang.lower().startswith("en"):
+        return text
     if not settings.has_llm():
-        logger.warning("No LLM configured; returning Urdu script as-is.")
+        logger.warning("No LLM configured; returning transcript in source language.")
         return text
 
     from .llm import chat_completion
 
+    label = lang or "Urdu"
     prompt = (
-        "The following text was transcribed from an Urdu speech recording by "
-        "Whisper and may contain misheard or garbled words. Using context, "
-        "understand what the speaker actually meant and translate it into clean, "
-        "natural, grammatically correct English. Return ONLY the English "
-        f"translation, nothing else. Text: {text}"
+        f"The following text was transcribed from {label} speech by Whisper and "
+        "may contain misheard or garbled words. Using context, understand what "
+        "the speaker actually meant and translate it into clean, natural, "
+        "grammatically correct English. Return ONLY the English translation, "
+        f"nothing else. Text: {text}"
     )
     try:
         translated = chat_completion(
             [{"role": "user", "content": prompt}],
             temperature=0.0,
-            max_tokens=4096,
+            max_tokens=settings.prep_max_tokens,
         )
         translated = (translated or "").strip()
         return translated or text
-    except Exception as exc:  # pragma: no cover - environment dependent
-        logger.warning("Urdu->English translation failed (%s); using original.", exc)
+    except Exception as exc:
+        logger.warning("Translation from %s failed (%s); using original.", label, exc)
         return text
 
 
-def transcribe_audio(audio_path: str) -> str:
-    """Transcribe an audio file to text.
+def urdu_to_english(text: str) -> str:
+    return translate_to_english(text, "ur")
 
-    Uses local Whisper by default; falls back to the OpenAI Whisper API
-    when the local model is unavailable. When no model source is available,
-    returns an empty transcript instead of crashing.
 
-    The Whisper output (Urdu script) is post-processed into clean English via
-    the configured LLM when available.
-    """
+def transcribe_audio(audio_path: str, language: str | None = None) -> str:
+    """Transcribe audio, translate non-English output, and return English text."""
     if not os.path.exists(audio_path):
         raise FileNotFoundError(f"Audio file not found: {audio_path}")
 
     start = time.perf_counter()
     text = ""
+    detected_language = (language or settings.whisper_lang or "").strip()
     if not settings.whisper_api_enabled:
         try:
-            text = _transcribe_local(audio_path)
+            text, local_language = _transcribe_local(audio_path, language)
+            detected_language = detected_language or local_language
             if not text:
                 logger.warning("Local Whisper returned empty transcript.")
-        except Exception as exc:  # pragma: no cover - environment dependent
+        except Exception as exc:
             logger.warning("Local Whisper failed (%s).", exc)
 
     if not text and settings.has_llm():
         try:
-            text = _transcribe_api(audio_path)
-        except Exception as exc:  # pragma: no cover - environment dependent
+            text = _transcribe_api(audio_path, language)
+        except Exception as exc:
             logger.warning("Whisper API failed (%s).", exc)
 
     if not text:
@@ -291,6 +288,10 @@ def transcribe_audio(audio_path: str) -> str:
             "Transcription unavailable: no Whisper model or API could transcribe the audio."
         )
 
-    result = urdu_to_english(text)
+    has_urdu_script = any("\u0600" <= ch <= "\u06ff" for ch in text)
+    if detected_language and not detected_language.lower().startswith("en"):
+        text = translate_to_english(text, detected_language)
+    elif has_urdu_script:
+        text = translate_to_english(text, "ur")
     logger.info("Whisper transcription took %.2fs", time.perf_counter() - start)
-    return result
+    return text

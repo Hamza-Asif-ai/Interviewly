@@ -77,7 +77,11 @@ def client(tmp_path, monkeypatch):
         return {}
 
     monkeypatch.setattr(practice, "_probe_duration", fake_probe)
-    monkeypatch.setattr(practice, "transcribe_audio", lambda path: "A long enough transcript.")
+    monkeypatch.setattr(
+        practice,
+        "transcribe_audio",
+        lambda path, language="": "A long enough transcript.",
+    )
     monkeypatch.setattr(practice, "_run_analysis", fake_analysis)
     monkeypatch.setattr(practice, "build_scorecard", lambda *a: {"overall_score": 7.0})
     monkeypatch.setattr(practice, "analyze_report_with_llm", fake_review)

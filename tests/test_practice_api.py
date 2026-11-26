@@ -59,7 +59,7 @@ def client(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(practice, "extract_audio_from_video", fake_extract)
     monkeypatch.setattr(practice, "_probe_duration", fake_probe)
-    monkeypatch.setattr(practice, "transcribe_audio", lambda path: "A long enough transcript.")
+    monkeypatch.setattr(practice, "transcribe_audio", lambda path, language="": "A long enough transcript.")
     monkeypatch.setattr(practice, "_run_analysis", fake_analysis)
     monkeypatch.setattr(practice, "build_scorecard", lambda *args: {"overall_score": 7.0})
     monkeypatch.setattr(practice, "analyze_report_with_llm", fake_review)
@@ -87,14 +87,16 @@ def _upload(client):
 
 
 def test_short_transcript_is_rejected(client, monkeypatch) -> None:
-    monkeypatch.setattr(practice, "transcribe_audio", lambda path: "hello")
+    monkeypatch.setattr(
+        practice, "transcribe_audio", lambda path, language="": "hello"
+    )
     response = _upload(client)
     assert response.status_code == 422
     assert "No speech detected" in response.json()["detail"]
 
 
 def test_unavailable_transcription_returns_503(client, monkeypatch) -> None:
-    def fail(path):
+    def fail(path, language=""):
         raise TranscriptionError("No working transcription source.")
 
     monkeypatch.setattr(practice, "transcribe_audio", fail)

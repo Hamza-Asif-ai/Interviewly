@@ -303,7 +303,10 @@ def _render_practice(
 
 
 def _analyze_practice_handler(
-    video: str | None, question_prompt: str, fast_mode: bool = False
+    video: str | None,
+    question_prompt: str,
+    language: str = "Auto",
+    fast_mode: bool = False,
 ) -> tuple:
     """Analyze a practice video end to end and return display outputs."""
     import traceback
@@ -326,7 +329,8 @@ def _analyze_practice_handler(
 
         extract_audio_from_video(video_path, audio_path)
         duration = _probe_duration(audio_path)
-        transcript = transcribe_audio(audio_path)
+        language_code = {"English": "en", "Urdu": "ur"}.get(language, "")
+        transcript = transcribe_audio(audio_path, language_code)
         text_metrics = _run(analyze_text(transcript, duration, question_prompt))
         speech_metrics = analyze_audio(audio_path, len(transcript.split()))
         visual_metrics = analyze_video(video_path)
@@ -446,6 +450,12 @@ def build_gradio_app() -> gr.Blocks:
                         lines=3,
                         placeholder="e.g. Tell me about a time you led a project...",
                     )
+                    language_input = gr.Dropdown(
+                        label="Spoken language",
+                        choices=["Auto", "English", "Urdu"],
+                        value="Auto",
+                        info="Urdu answers are translated to English before scoring.",
+                    )
                     analyze_btn = gr.Button("Analyze Performance", variant="primary")
                     fast_mode_practice = gr.Checkbox(
                         label="Fast Mode (instant demo)",
@@ -480,7 +490,12 @@ def build_gradio_app() -> gr.Blocks:
 
             analyze_btn.click(
                 _analyze_practice_handler,
-                inputs=[video_input, question_input, fast_mode_practice],
+                inputs=[
+                    video_input,
+                    question_input,
+                    language_input,
+                    fast_mode_practice,
+                ],
                 outputs=[
                     content_gauge,
                     speech_gauge,
