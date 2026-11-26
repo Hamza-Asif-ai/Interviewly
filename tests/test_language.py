@@ -61,6 +61,22 @@ def test_detected_urdu_is_translated(monkeypatch, tmp_path) -> None:
     assert transcription.transcribe_audio(str(audio)) == "hello world"
 
 
+def test_bundled_ffmpeg_is_staged_with_platform_name(monkeypatch, tmp_path) -> None:
+    bundled = tmp_path / "imageio_ffmpeg_binary"
+    bundled.write_bytes(b"ffmpeg")
+    monkeypatch.setattr(transcription.shutil, "which", lambda name: None)
+    monkeypatch.setattr(transcription, "_bundled_ffmpeg_name", lambda: "ffmpeg")
+    monkeypatch.setattr(config.settings, "upload_dir", str(tmp_path))
+    monkeypatch.setenv("PATH", "")
+    import imageio_ffmpeg
+
+    monkeypatch.setattr(imageio_ffmpeg, "get_ffmpeg_exe", lambda: str(bundled))
+    transcription._ensure_ffmpeg_on_path()
+    staged = tmp_path / "ffmpeg_bin" / "ffmpeg"
+    assert staged.exists()
+    assert config.settings.upload_dir in str(staged)
+
+
 def test_api_rejects_unsupported_language() -> None:
     from fastapi import FastAPI
     from fastapi.testclient import TestClient

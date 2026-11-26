@@ -50,7 +50,7 @@ Generic question banks don't prepare anyone for a specific role at a specific co
 - Produce full STAR-format (Situation, Task, Action, Result) model answers aligned to the target JD and company — each capped at 3 sentences for fast, focused delivery
 - Analyze a practice interview video across three independent dimensions: **Content**, **Speech**, and **Visual delivery**
 - Return a weighted scorecard with concrete strengths, weaknesses, and improvement tips — not just a number
-- Never fail a live demo: a **Fast Mode** and a **crash-safe JSON fallback** guarantee a 200 response even when the LLM is slow, rate-limited, or retired
+- Keep demos honest: **Fast Mode** serves clearly labelled demo data; real analysis returns `503` instead of silently substituting cached answers
 - Export the prep guide as a downloadable PDF
 
 ---
@@ -63,12 +63,12 @@ Generic question banks don't prepare anyone for a specific role at a specific co
 | Web UI | Gradio (mounted on the FastAPI app at `/`) |
 | LLM (Q&A generation, JSON repair, scoring review) | Google Gemini via an OpenAI-compatible endpoint, with an automatic model-fallback chain (any OpenAI-compatible base URL works) |
 | Speech-to-Text | OpenAI Whisper (local, model size configurable), with an optional Whisper-API fallback |
-| RAG / Embeddings | ChromaDB (persistent, per-session collections) + Sentence-Transformers (`all-MiniLM-L6-v2`, lazy-loaded once) |
+| RAG / Embeddings | ChromaDB (ephemeral, per-request collections) + Sentence-Transformers (`all-MiniLM-L6-v2`, lazy-loaded once) |
 | Audio Analysis | librosa (VAD via RMS energy, pitch via `pyin`) + soundfile |
 | Video Analysis | OpenCV + MediaPipe Holistic (Face Mesh + Pose) |
 | Database | SQLite via SQLAlchemy (Users → Sessions → PrepGuides / PracticeVideos → AnalysisReports) |
 | Document Parsing | pdfplumber (PyPDF2 fallback), python-docx |
-| PDF Export | fpdf2, with a Unicode → latin-1 sanitizer for LLM output |
+| PDF Export | fpdf2 with embedded DejaVu Unicode font, Arabic shaping and RTL display |
 | Deployment | Docker + docker-compose, one-command deploy on Render |
 | Language | Python 3.11 |
 | Notebook | Jupyter (`Interviewly_Demo.ipynb`) |
@@ -80,7 +80,7 @@ Generic question banks don't prepare anyone for a specific role at a specific co
 ### 1️⃣ Prep Engine
 **Input:** CV (PDF / DOCX / TXT) + Job Description + Company Overview
 
-**Pipeline:** the CV, JD, and company text are chunked, embedded, and stored in a fresh ChromaDB collection per request; retrieved context plus a section-labeled *"verified facts"* sheet parsed straight from the CV are handed to the LLM under a strict grounding prompt. The entire LLM call is bounded by a **25-second timeout**; if the model 404s (retired), is rate-limited, times out, or returns unusable JSON, the engine transparently falls back to `data/prep_guide_fallback.json` so the user still gets a polished guide instead of an error.
+**Pipeline:** CV, JD, and company text are chunked, embedded, and stored in an ephemeral ChromaDB collection per request; bounded, source-scoped context plus a section-labeled *"verified facts"* sheet parsed from the CV are handed to the LLM under a strict grounding prompt. Every model attempt is capped by `LLM_TIMEOUT` and the fallback chain by `LLM_TOTAL_TIMEOUT`. If no model works, the API returns `503`; it never silently substitutes `data/prep_guide_fallback.json`.
 
 **Output:** an exportable preparation guide containing:
 - **5 technical questions** tailored to the JD, each with a short STAR model answer (≤3 sentences)
@@ -113,7 +113,7 @@ Built for live demos and uptime: **a one-click instant-demo toggle on both tabs.
 | **Prep Engine** | Skips the LLM entirely; serves `data/prep_guide_fallback.json` | **~0.5 s** |
 | **Practice Engine** | Skips Whisper/MediaPipe; serves `data/practice_scorecard_fallback.json` (pre-saved demo scorecard + review + transcript) | **< 1 s** |
 
-The same fallback files are used automatically when the LLM times out or fails after retries, so the public URL stays responsive even under API outages.
+Fast Mode is opt-in and every output is labelled `DEMO DATA`. Real generation and analysis do not use these files on failure; they report the error instead.
 
 ---
 
@@ -168,8 +168,9 @@ Model names were checked against Google's official Models page. On Render, updat
 | Setting | Default | Why |
 |---|---|---|
 | `WHISPER_MODEL` | `small` | Local Whisper model size — `base` for speed, `medium` for accuracy |
-| `WHISPER_LANG` | (auto) | Force a Whisper language code (e.g. `en`, `ur`); empty = auto-detect |
+| `WHISPER_LANG` | (auto) | Default Whisper language (`en`/`ur`); per-request UI/API selection overrides it |
 | `WHISPER_API_ENABLED` | `false` | When `true`, skips the local model and uses the Whisper API directly |
+| Translation | automatic | Non-English transcripts are translated to English before scoring; Urdu fillers are counted |
 | VAD threshold | 30th-percentile RMS × 0.6 | Separates voiced speech from silence without a video-dependent noise floor |
 | `pyin` pitch range | 50–500 Hz | Human speaking-voice fundamental-frequency range |
 
@@ -184,7 +185,9 @@ Model names were checked against Google's official Models page. On Render, updat
 | Setting | Default | Why |
 |---|---|---|
 | `MAX_UPLOAD_MB` | 50 | Caps CV and video upload size; larger uploads get HTTP 413. Streamed to disk in chunks |
-| Allowed CV types | `.pdf .docx .doc .txt` | — |
+| `MAX_INPUT_CHARS` | 20000 | Caps extracted CV/JD/company and question-prompt text |
+| `RAG_CONTEXT_CHARS` / `RAG_MAX_CHUNKS` | 4000 / 8 | Bounds prompt context size per source |
+| Allowed CV types | `.pdf .docx .doc .txt` | Legacy `.doc` returns a clear save-as `.docx`/`.pdf` error |
 | Allowed video types | `.mp4 .mov .avi .mkv .webm` | — |
 
 ---

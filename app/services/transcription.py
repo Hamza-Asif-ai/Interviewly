@@ -163,6 +163,10 @@ def _load_local_model():
     return _WHISPER_MODEL
 
 
+def _bundled_ffmpeg_name() -> str:
+    return "ffmpeg.exe" if os.name == "nt" else "ffmpeg"
+
+
 def _ensure_ffmpeg_on_path() -> None:
     """Make an ffmpeg executable name discoverable by subprocess consumers.
 
@@ -178,11 +182,10 @@ def _ensure_ffmpeg_on_path() -> None:
         bundled = imageio_ffmpeg.get_ffmpeg_exe()
         staging_dir = Path(settings.upload_dir) / "ffmpeg_bin"
         staging_dir.mkdir(parents=True, exist_ok=True)
-        staged = staging_dir / "ffmpeg.exe"
+        staged = staging_dir / _bundled_ffmpeg_name()
         if not staged.exists():
-            import shutil as _shutil
-
-            _shutil.copyfile(bundled, staged)
+            shutil.copyfile(bundled, staged)
+        os.chmod(staged, 0o755)
 
         os.environ["AUDIO_TOOLS_FFMPEG"] = str(staged)
         bindir = str(staging_dir)

@@ -1,0 +1,13 @@
+.git
+.gitignore
+.venv
+__pycache__
+*.py[cod]
+.env
+*.log
+.pytest_cache
+.ipynb_checkpoints
+data/interviewly.db
+data/uploads/*
+data/pdfs/*
+tests
