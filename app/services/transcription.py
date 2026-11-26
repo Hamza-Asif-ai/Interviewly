@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shutil
 import subprocess
 import time
 from pathlib import Path
+from typing import Any, Dict
 
 from ..config import settings
 
@@ -46,6 +48,68 @@ def _get_ffmpeg_exe() -> str:
         raise RuntimeError(
             f"ffmpeg not found. Install it (apt-get install ffmpeg) and retry: {exc}"
         ) from exc
+
+
+def _get_ffprobe_exe() -> str:
+    """Resolve an ffprobe executable, or return an empty string if unavailable."""
+    system_ffprobe = shutil.which("ffprobe")
+    if system_ffprobe:
+        return system_ffprobe
+    try:
+        ffmpeg = Path(_get_ffmpeg_exe())
+        sibling = ffmpeg.with_name("ffprobe.exe" if ffmpeg.suffix else "ffprobe")
+        if sibling.exists():
+            return str(sibling)
+    except RuntimeError:
+        pass
+    return ""
+
+
+def probe_media(path: str) -> Dict[str, Any]:
+    """Validate a media file with ffprobe before any expensive processing."""
+    if not os.path.exists(path):
+        return {"valid": False, "error": "File not found."}
+    executable = _get_ffprobe_exe()
+    if not executable:
+        logger.warning("ffprobe unavailable; skipping media validation.")
+        return {"valid": True, "skipped": True, "has_video": True, "has_audio": True}
+    try:
+        result = subprocess.run(
+            [
+                executable, "-v", "error",
+                "-show_entries", "format=format_name,duration:stream=codec_type",
+                "-of", "json", path,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if result.returncode != 0:
+            return {
+                "valid": False,
+                "error": "Invalid or corrupt media file: ffprobe could not read it.",
+            }
+        data = json.loads(result.stdout or "{}")
+        streams = data.get("streams") or []
+        fmt = data.get("format") or {}
+        has_video = any(s.get("codec_type") == "video" for s in streams)
+        has_audio = any(s.get("codec_type") == "audio" for s in streams)
+        error = None
+        if not has_video:
+            error = "File has no video stream."
+        elif not has_audio:
+            error = "Video has no audio track."
+        return {
+            "valid": error is None,
+            "error": error,
+            "has_video": has_video,
+            "has_audio": has_audio,
+            "duration": float(fmt.get("duration") or 0.0),
+            "format_name": str(fmt.get("format_name") or ""),
+        }
+    except Exception as exc:
+        logger.warning("ffprobe validation failed for %s: %s", path, exc)
+        return {"valid": False, "error": f"Invalid or corrupt media file: {exc}"}
 
 
 def ffmpeg_available() -> bool:

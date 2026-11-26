@@ -47,6 +47,16 @@ def client(tmp_path, monkeypatch):
         return {}
 
     monkeypatch.setattr(practice, "_save_video", fake_save)
+    monkeypatch.setattr(
+        practice,
+        "probe_media",
+        lambda path: {
+            "valid": True,
+            "has_video": True,
+            "has_audio": True,
+            "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
+        },
+    )
     monkeypatch.setattr(practice, "extract_audio_from_video", fake_extract)
     monkeypatch.setattr(practice, "_probe_duration", fake_probe)
     monkeypatch.setattr(practice, "transcribe_audio", lambda path: "A long enough transcript.")

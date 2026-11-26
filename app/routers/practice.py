@@ -22,7 +22,7 @@ from ..services import (
     transcribe_audio,
     extract_audio_from_video,
 )
-from ..services.transcription import TranscriptionError
+from ..services.transcription import TranscriptionError, probe_media
 from starlette.concurrency import run_in_threadpool
 
 logger = logging.getLogger(__name__)
@@ -31,6 +31,22 @@ router = APIRouter(prefix="/practice", tags=["practice"])
 
 VIDEO_EXTENSIONS = (".mp4", ".mov", ".avi", ".mkv", ".webm")
 MIN_TRANSCRIPT_WORDS = 3
+
+_FORMAT_HINTS = {
+    ".mp4": ("mp4", "mov"),
+    ".mov": ("mov", "mp4"),
+    ".mkv": ("matroska",),
+    ".webm": ("webm",),
+    ".avi": ("avi",),
+}
+
+
+def _extension_matches_format(extension: str, format_name: str) -> bool:
+    """Detect files whose extension lies about the actual container format."""
+    hints = _FORMAT_HINTS.get(extension)
+    if not hints or not format_name:
+        return True
+    return any(hint in format_name.lower() for hint in hints)
 
 
 async def _save_video(file: UploadFile, extension: str) -> str:
@@ -83,6 +99,25 @@ async def upload_practice_video(
     )
 
     try:
+        probe = await run_in_threadpool(probe_media, video_path)
+        if not probe.get("valid"):
+            raise HTTPException(
+                status_code=422,
+                detail=probe.get("error") or "Invalid or corrupt video file.",
+            )
+        if not probe.get("skipped"):
+            if not probe.get("has_video"):
+                raise HTTPException(status_code=422, detail="File has no video stream.")
+            if not probe.get("has_audio"):
+                raise HTTPException(status_code=422, detail="Video has no audio track.")
+            if not _extension_matches_format(
+                extension, str(probe.get("format_name") or "")
+            ):
+                raise HTTPException(
+                    status_code=422,
+                    detail="File extension does not match its contents.",
+                )
+
         await run_in_threadpool(extract_audio_from_video, video_path, audio_path)
         duration = await _probe_duration(audio_path)
 

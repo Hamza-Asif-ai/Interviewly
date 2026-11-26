@@ -141,13 +141,15 @@ def analyze_video(video_path: str) -> Dict[str, Any]:
     if not capture.isOpened():
         raise ValueError(f"Could not open video: {video_path}")
 
-    fps = float(capture.get(cv2.CAP_PROP_FPS)) or 30.0
+    raw_fps = float(capture.get(cv2.CAP_PROP_FPS))
+    fps = (
+        raw_fps if math.isfinite(raw_fps) and 0 < raw_fps <= 1000 else 30.0
+    )
     frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
     if frame_count <= 0:
-        capture.release()
-        raise ValueError(f"Video has no frames: {video_path}")
-
-    sample_indices = {int(i * fps) for i in range(int(frame_count / fps) + 1)}
+        logger.warning(
+            "Video frame count is unknown (%d); sampling by timestamp.", frame_count
+        )
 
     face_frames = 0
     eye_contact_frames = 0
@@ -180,13 +182,21 @@ def analyze_video(video_path: str) -> Dict[str, Any]:
 
     try:
         index = 0
+        next_sample_at = 0.0
         while True:
             ok, frame = capture.read()
             if not ok:
                 break
-            if index not in sample_indices:
+            timestamp_ms = float(capture.get(cv2.CAP_PROP_POS_MSEC))
+            timestamp = (
+                timestamp_ms / 1000.0
+                if math.isfinite(timestamp_ms) and timestamp_ms >= 0
+                else index / fps
+            )
+            if timestamp + 1e-6 < next_sample_at:
                 index += 1
                 continue
+            next_sample_at = timestamp + 1.0
 
             height, width, _ = frame.shape
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
