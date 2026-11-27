@@ -7,6 +7,7 @@ ENV PYTHONUNBUFFERED=1 \
 # Install system dependencies for ffmpeg, OpenCV, MediaPipe, and build tools
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
+    fonts-dejavu-core \
     libgl1 \
     libglib2.0-0 \
     libsm6 \
@@ -19,11 +20,17 @@ WORKDIR /app
 
 COPY requirements.txt .
 
-# FIX: Pin setuptools<82 so pkg_resources is available for openai-whisper build.
-# Also install openai-whisper separately BEFORE the rest of requirements.
 RUN pip install --upgrade pip "setuptools<82" wheel && \
-    pip install --no-build-isolation openai-whisper && \
+    pip install --index-url https://download.pytorch.org/whl/cpu torch==2.5.1 && \
+    pip install --no-build-isolation openai-whisper==20240930 && \
     pip install --no-build-isolation -r requirements.txt
+
+# Pre-download the Whisper and MediaPipe models into the image so the first
+# request never needs network access to fetch model weights.
+ARG WHISPER_MODEL=base
+ENV WHISPER_MODEL=${WHISPER_MODEL}
+RUN python -c "import whisper; whisper.load_model('${WHISPER_MODEL}')" && \
+    python -c "import mediapipe as mp; h = mp.solutions.holistic.Holistic(); h.close()"
 
 COPY . .
 

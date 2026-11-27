@@ -17,8 +17,8 @@ class PrepGenerateRequest(BaseModel):
 class Question(BaseModel):
     """A single interview question with its STAR-format model answer."""
 
-    question: str
-    answer: str
+    question: str = Field(min_length=1)
+    answer: str = Field(min_length=1)
 
 
 class PrepGuide(BaseModel):
@@ -30,6 +30,15 @@ class PrepGuide(BaseModel):
     skill_gaps: List[str]
 
 
+class GeneratedPrepGuide(BaseModel):
+    """Strict shape enforced on LLM-generated guides."""
+
+    technical_questions: List[Question] = Field(min_length=5, max_length=5)
+    behavioral_questions: List[Question] = Field(min_length=3, max_length=3)
+    positioning_tips: List[str] = Field(min_length=5, max_length=5)
+    skill_gaps: List[str] = Field(min_length=5, max_length=5)
+
+
 class PrepGuideResponse(BaseModel):
     """Response payload for a prep guide."""
 
@@ -39,6 +48,7 @@ class PrepGuideResponse(BaseModel):
     company_overview: str
     guide: PrepGuide
     created_at: Optional[str] = None
+    access_token: Optional[str] = None
 
 
 class PracticeUploadResponse(BaseModel):
@@ -49,6 +59,7 @@ class PracticeUploadResponse(BaseModel):
     duration_seconds: float
     transcript: str
     scorecard: Dict[str, Any]
+    access_token: Optional[str] = None
 
 
 class FillerWordCounts(BaseModel):
@@ -56,8 +67,12 @@ class FillerWordCounts(BaseModel):
 
     um: int = 0
     uh: int = 0
+    erm: int = 0
+    hmm: int = 0
     like: int = 0
     basically: int = 0
+    literally: int = 0
+    actually: int = 0
     you_know: int = 0
     matlab: int = 0
     yaani: int = 0
@@ -71,16 +86,18 @@ class TextMetrics(BaseModel):
     filler_word_count: int
     filler_word_counts: FillerWordCounts
     filler_words_per_minute: float
-    conciseness_score: float = Field(ge=0, le=10)
+    conciseness_score: Optional[float] = Field(default=None, ge=0, le=10)
     star_score: float = Field(ge=0, le=10)
-    relevance_score: float = Field(ge=0, le=10)
+    relevance_score: Optional[float] = Field(default=None, ge=0, le=10)
 
 
 class SpeechMetrics(BaseModel):
     """Metrics from audio signal analysis."""
 
     speaking_rate_wpm: float
+    words_per_minute: float = 0.0
     pause_ratio: float
+    pause_count: int = 0
     pitch_mean_hz: float
     pitch_std_hz: float
     energy_variance: float
@@ -105,7 +122,7 @@ class AnalysisReportResponse(BaseModel):
     transcript: str
     content_score: float
     speech_score: float
-    visual_score: float
+    visual_score: Optional[float]
     overall_score: float
     text_metrics: TextMetrics
     speech_metrics: SpeechMetrics

@@ -8,13 +8,19 @@ from typing import Any, Dict
 
 logger = logging.getLogger(__name__)
 
+PAUSE_THRESHOLD_S = 0.3
 
-def analyze_audio(audio_path: str) -> Dict[str, Any]:
+
+def analyze_audio(audio_path: str, word_count: int = 0) -> Dict[str, Any]:
     """Analyse a 16 kHz mono WAV file using librosa.
 
+    Args:
+        audio_path: Path to the 16 kHz mono WAV file.
+        word_count: Number of words in the transcript (for the WPM estimate).
+
     Returns:
-        speaking_rate_wpm: Estimated words per minute from voice activity.
-        pause_ratio: Fraction of total duration spent in silence (>0.3s).
+        speaking_rate_wpm: Transcribed words per minute over voiced speaking time.
+        pause_ratio: Fraction of total duration spent in deliberate pauses (>0.3s).
         pitch_mean_hz: Mean fundamental frequency of voiced segments.
         pitch_std_hz: Standard deviation of fundamental frequency.
         energy_variance: Variance of frame-level RMS energy.
@@ -31,7 +37,9 @@ def analyze_audio(audio_path: str) -> Dict[str, Any]:
     if duration < 0.01:
         return {
             "speaking_rate_wpm": 0.0,
+            "words_per_minute": 0.0,
             "pause_ratio": 0.0,
+            "pause_count": 0,
             "pitch_mean_hz": 0.0,
             "pitch_std_hz": 0.0,
             "energy_variance": 0.0,
@@ -47,14 +55,44 @@ def analyze_audio(audio_path: str) -> Dict[str, Any]:
 
     frames = len(rms)
     frame_duration = hop_length / sr
-    voiced_frames = int(np.sum(rms > threshold))
-    voiced_duration = voiced_frames * frame_duration
-    pause_duration = max(duration - voiced_duration, 0.0)
+    voiced_mask = rms > threshold
+    # Sum the durations of contiguous voiced segments.
+    voiced_seconds = 0.0
+    run = 0
+    for is_voiced in voiced_mask:
+        if is_voiced:
+            run += 1
+        elif run:
+            voiced_seconds += run * frame_duration
+            run = 0
+    if run:
+        voiced_seconds += run * frame_duration
+    # Only silence long enough to be a deliberate pause (>0.3s) contributes to
+    # the pause count and the pause ratio; micro-gaps are part of normal speech.
+    pause_count = 0
+    pause_seconds = 0.0
+    silent_run = 0
+    for is_voiced in voiced_mask:
+        if is_voiced:
+            run_seconds = silent_run * frame_duration
+            if run_seconds > PAUSE_THRESHOLD_S:
+                pause_count += 1
+                pause_seconds += run_seconds
+            silent_run = 0
+        else:
+            silent_run += 1
+    trailing_seconds = silent_run * frame_duration
+    if trailing_seconds > PAUSE_THRESHOLD_S:
+        pause_count += 1
+        pause_seconds += trailing_seconds
 
-    # Estimated speaking rate: assume a continuous speaker at ~140 words/min.
-    # Scale by the voiced fraction of the timestamp so pauses reduce the rate.
-    wpm = round(140.0 * (voiced_duration / max(duration, 0.01)), 1)
-    wpm = max(0.0, min(wpm, 250.0))
+    # Real speaking rate: transcribed words over voiced (speaking) time, plus
+    # the overall transcript WPM over the full clip duration.
+    if voiced_seconds > 0:
+        wpm = round(word_count / (voiced_seconds / 60.0), 1)
+    else:
+        wpm = 0.0
+    overall_wpm = round(word_count / (duration / 60.0), 1) if word_count else 0.0
 
     # Pitch (F0) via pyin
     f0, voiced_flag, _ = librosa.pyin(
@@ -68,8 +106,8 @@ def analyze_audio(audio_path: str) -> Dict[str, Any]:
     # Energy variance
     energy_var = float(np.var(rms))
 
-    # Pause ratio
-    pause_ratio = round(pause_duration / max(duration, 0.01), 3)
+    # Pause ratio from qualifying pauses only
+    pause_ratio = round(pause_seconds / max(duration, 0.01), 3)
 
     # Clarity score heuristic (0-10)
     # Good: 120-180 wpm, 0.2-0.35 pause ratio, moderate pitch variation
@@ -97,7 +135,9 @@ def analyze_audio(audio_path: str) -> Dict[str, Any]:
 
     return {
         "speaking_rate_wpm": max(0, wpm),
+        "words_per_minute": max(0.0, overall_wpm),
         "pause_ratio": pause_ratio,
+        "pause_count": pause_count,
         "pitch_mean_hz": round(pitch_mean, 1),
         "pitch_std_hz": round(pitch_std, 2),
         "energy_variance": round(energy_var, 6),

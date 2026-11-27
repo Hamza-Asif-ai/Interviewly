@@ -28,10 +28,19 @@ class Settings:
     def __init__(self) -> None:
         self.openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
         self.openai_base_url: str = os.getenv(
-            "OPENAI_BASE_URL", "https://api.openai.com/v1"
+            "OPENAI_BASE_URL",
+            "https://generativelanguage.googleapis.com/v1beta/openai/",
         )
-        self.llm_model: str = os.getenv("LLM_MODEL", "gpt-4o-mini")
-        self.llm_timeout: float = float(os.getenv("LLM_TIMEOUT", "60"))
+        self.llm_model: str = os.getenv("LLM_MODEL", "gemini-3.8-flash")
+        fallback_raw = os.getenv(
+            "LLM_MODEL_FALLBACKS",
+            "gemini-3.8-flash,gemini-3.6-flash,gemini-3.5-flash-lite",
+        )
+        self.llm_model_fallbacks: List[str] = [
+            m.strip() for m in fallback_raw.split(",") if m.strip()
+        ]
+        self.llm_timeout: float = float(os.getenv("LLM_TIMEOUT", "25"))
+        self.llm_total_timeout: float = float(os.getenv("LLM_TOTAL_TIMEOUT", "75"))
         self.prep_max_tokens: int = int(os.getenv("PREP_MAX_TOKENS", "8192"))
         self.prep_retries: int = int(os.getenv("PREP_RETRIES", "2"))
         self.prep_fallback_path: str = os.getenv(
@@ -42,15 +51,39 @@ class Settings:
             str(BASE_DIR / "data" / "practice_scorecard_fallback.json"),
         )
         self.whisper_model: str = os.getenv("WHISPER_MODEL", "base")
-        self.max_upload_mb: int = int(os.getenv("MAX_UPLOAD_MB", "200"))
+        # Empty WHISPER_LANG => auto-detect the spoken language.
+        self.whisper_lang: str = os.getenv("WHISPER_LANG", "").strip()
+        self.max_upload_mb: int = int(os.getenv("MAX_UPLOAD_MB", "50"))
         self.max_upload_bytes: int = self.max_upload_mb * 1024 * 1024
-
-        self.database_url: str = os.getenv(
-            "DATABASE_URL", f"sqlite:///{DB_PATH.as_posix()}"
+        self.max_input_chars: int = int(os.getenv("MAX_INPUT_CHARS", "20000"))
+        self.rag_context_chars: int = int(os.getenv("RAG_CONTEXT_CHARS", "4000"))
+        self.rag_max_chunks: int = int(os.getenv("RAG_MAX_CHUNKS", "8"))
+        self.pdf_ttl_hours: int = int(os.getenv("PDF_TTL_HOURS", "48"))
+        self.retention_hours: int = int(os.getenv("RETENTION_HOURS", "168"))
+        self.retention_interval_hours: float = float(
+            os.getenv("RETENTION_INTERVAL_HOURS", "6")
         )
-        self.chroma_dir: str = os.getenv("CHROMA_DIR", CHROMA_DIR.as_posix())
-        self.upload_dir: str = os.getenv("UPLOAD_DIR", UPLOAD_DIR.as_posix())
-        self.pdf_dir: str = os.getenv("PDF_DIR", PDFS_DIR.as_posix())
+        self.rate_limit_per_minute: int = int(os.getenv("RATE_LIMIT_PER_MINUTE", "20"))
+        self.max_concurrent_analyses: int = int(
+            os.getenv("MAX_CONCURRENT_ANALYSES", "2")
+        )
+        self.trusted_proxy_ips: List[str] = [
+            ip.strip()
+            for ip in os.getenv("TRUSTED_PROXY_IPS", "").split(",")
+            if ip.strip()
+        ]
+        self.cors_origins: List[str] = [
+            origin.strip()
+            for origin in os.getenv("CORS_ORIGINS", "").split(",")
+            if origin.strip()
+        ]
+
+        self.database_url: str = (
+            os.getenv("DATABASE_URL") or f"sqlite:///{DB_PATH.as_posix()}"
+        )
+        self.chroma_dir: str = os.getenv("CHROMA_DIR") or CHROMA_DIR.as_posix()
+        self.upload_dir: str = os.getenv("UPLOAD_DIR") or UPLOAD_DIR.as_posix()
+        self.pdf_dir: str = os.getenv("PDF_DIR") or PDFS_DIR.as_posix()
 
         self.whisper_api_enabled: bool = (
             os.getenv("WHISPER_API_ENABLED", "false").lower() == "true"

@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 import uuid
 import warnings
 from functools import lru_cache
@@ -20,6 +21,10 @@ from .llm import achat_completion, extract_faithful_json
 warnings.filterwarnings("ignore")
 
 logger = logging.getLogger(__name__)
+
+
+class PrepGuideError(RuntimeError):
+    """Raised when a real, CV-grounded prep guide could not be generated."""
 
 
 @lru_cache(maxsize=1)
@@ -235,6 +240,23 @@ def _salvage_json(content: str) -> Dict[str, Any]:
     return parsed
 
 
+_PLACEHOLDER_PATTERNS = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"\bunable to generate\b",
+        r"\bplease provide\b",
+        r"\bno job description\b",
+        r"\bno candidate cv\b",
+        r"\bno company\b",
+        r"\bnone provided\b",
+        r"\bacme analytics\b",
+        r"\blorem ipsum\b",
+        r"\bi can't (?:answer|provide|generate|complete)\b",
+        r"\btbd\b",
+    )
+)
+
+
 def validate_guide(guide: Any) -> Dict[str, Any]:
     """Ensure a parsed guide contains real, non-empty, non-placeholder content."""
     if not isinstance(guide, dict):
@@ -250,41 +272,54 @@ def validate_guide(guide: Any) -> Dict[str, Any]:
     if missing:
         raise ValueError(f"Guide is missing required keys: {missing}")
 
-    placeholder_markers = (
-        "unable to generate",
-        "please provide",
-        "i can't",
-        "no job description",
-        "no candidate cv",
-        "no company",
-        "none provided",
-    )
-
     def _real(text: Any) -> bool:
         if not isinstance(text, str):
             return False
         low = text.strip().lower()
-        return bool(low) and not any(m in low for m in placeholder_markers)
+        return bool(low) and not any(
+            pattern.search(low) for pattern in _PLACEHOLDER_PATTERNS
+        )
 
     for key in ("technical_questions", "behavioral_questions"):
         items = guide.get(key, [])
         if not items:
             raise ValueError(f"Guide section '{key}' is empty.")
-        real_count = 0
         for item in items:
-            if isinstance(item, dict) and _real(item.get("question")) and _real(item.get("answer")):
-                real_count += 1
-            elif isinstance(item, str) and _real(item):
-                real_count += 1
-        if real_count == 0:
-            raise ValueError(f"Guide section '{key}' contains no real questions/answers.")
+            if not isinstance(item, dict):
+                raise ValueError(
+                    f"Guide section '{key}' must contain question objects with "
+                    "non-empty 'question' and 'answer' fields."
+                )
+            if not _real(item.get("question")) or not _real(item.get("answer")):
+                raise ValueError(
+                    f"Guide section '{key}' contains a question object with a "
+                    "placeholder or empty question/answer."
+                )
 
     for key in ("positioning_tips", "skill_gaps"):
         items = guide.get(key, [])
-        if not any(_real(item) for item in items):
-            raise ValueError(f"Guide section '{key}' is empty or contains only placeholders.")
+        if not all(_real(item) for item in items) or not items:
+            raise ValueError(f"Guide section '{key}' is empty or contains placeholders.")
 
-    return guide
+    counts = {
+        name: len(guide.get(name, []))
+        for name in ("technical_questions", "behavioral_questions",
+                     "positioning_tips", "skill_gaps")
+    }
+    if counts["technical_questions"] != 5 or counts["behavioral_questions"] != 3:
+        raise ValueError(
+            "Guide must contain exactly 5 technical questions and 3 behavioral "
+            f"questions (got {counts['technical_questions']} technical, "
+            f"{counts['behavioral_questions']} behavioral)."
+        )
+    # A single extra or missing tip/gap is a formatting quirk, not a reason to
+    # discard an otherwise grounded guide.
+    if not 4 <= counts["positioning_tips"] <= 6 or not 4 <= counts["skill_gaps"] <= 6:
+        raise ValueError(
+            "Guide must contain about 5 positioning tips and 5 skill gaps "
+            f"(got {counts['positioning_tips']} tips, {counts['skill_gaps']} gaps)."
+        )
+    return dict(guide)
 
 
 @lru_cache(maxsize=1)
@@ -306,13 +341,27 @@ class PrepEngine:
         # Unique per-instantiation collection so repeated generation never
         # collides and no cleanup/delete is required.
         self.collection_name = f"prep_{session_id}_{uuid.uuid4().hex[:8]}"
+        self._chroma_client = chromadb.EphemeralClient()
         self.cv_text: str = ""
         self.job_description: str = ""
         self.company_overview: str = ""
 
     def _collection(self):
-        chroma_client = chromadb.PersistentClient(path=settings.chroma_dir)
-        return chroma_client.get_or_create_collection(self.collection_name)
+        # One EphemeralClient per engine instance keeps indexing and retrieval
+        # in the same in-memory store, without touching persistent storage.
+        return self._chroma_client.get_or_create_collection(self.collection_name)
+
+    def cleanup(self) -> None:
+        """Delete this session's ChromaDB collection (best-effort)."""
+        try:
+            self._chroma_client.delete_collection(self.collection_name)
+            logger.info("Deleted ChromaDB collection '%s'.", self.collection_name)
+        except Exception as exc:  # pragma: no cover - cleanup must never raise
+            logger.warning(
+                "Could not delete ChromaDB collection '%s': %s",
+                self.collection_name,
+                exc,
+            )
 
     def index_documents(
         self, cv_text: str, job_description: str, company_overview: str
@@ -375,9 +424,22 @@ class PrepEngine:
 
     async def generate(self) -> Dict[str, Any]:
         """Build the prompt from retrieval context and generate the guide."""
-        cv = self._retrieve_all("candidate experience and skills")
-        jd = self._retrieve_all("job requirements and qualifications")
-        company = self._retrieve_all("company values and mission")
+        rag_start = time.perf_counter()
+        cv, jd, company = await asyncio.gather(
+            asyncio.to_thread(
+                self._retrieve_all, "candidate experience and skills", source="cv"
+            ),
+            asyncio.to_thread(
+                self._retrieve_all,
+                "job requirements and qualifications",
+                source="jd",
+                bounded=False,
+            ),
+            asyncio.to_thread(
+                self._retrieve_all, "company values and mission", source="company"
+            ),
+        )
+        logger.info("RAG retrieval took %.2fs", time.perf_counter() - rag_start)
 
         cv_facts = _facts_sheet(self.cv_text) or "Not provided."
 
@@ -399,20 +461,23 @@ class PrepEngine:
             {"role": "user", "content": context_block},
         ]
         if not settings.has_llm():
-            logger.warning("No LLM configured; returning fallback guide.")
-            return load_fallback_guide()
+            raise PrepGuideError(
+                "No LLM is configured. Add an API key to generate a CV-grounded "
+                "guide, or enable Fast Mode for a clearly labelled demo."
+            )
 
         last_error: Exception | None = None
         for attempt in range(1, settings.prep_retries + 1):
             try:
-                content = await asyncio.wait_for(
-                    achat_completion(
-                        messages,
-                        temperature=0.2,
-                        max_tokens=settings.prep_max_tokens,
-                    ),
+                llm_start = time.perf_counter()
+                content = await achat_completion(
+                    messages,
+                    temperature=0.2,
+                    max_tokens=settings.prep_max_tokens,
                     timeout=settings.llm_timeout,
+                    total_timeout=settings.llm_total_timeout,
                 )
+                logger.info("LLM call took %.2fs", time.perf_counter() - llm_start)
                 logger.info(
                     "Prep LLM attempt %d/%d: received %d chars, starts=%r, "
                     "ends_with_brace=%s",
@@ -451,15 +516,14 @@ class PrepEngine:
                     len(guide.get("skill_gaps", [])),
                 )
                 return guide
-            except asyncio.TimeoutError:
+            except asyncio.TimeoutError as exc:
+                last_error = exc
                 logger.warning(
-                    "LLM call exceeded %.0fs timeout (attempt %d/%d); "
-                    "returning fallback guide.",
+                    "LLM call exceeded %.0fs timeout (attempt %d/%d); retrying.",
                     settings.llm_timeout,
                     attempt,
                     settings.prep_retries,
                 )
-                return load_fallback_guide()
             except Exception as exc:  # noqa: BLE001 - retry on any other failure
                 last_error = exc
                 logger.warning(
@@ -484,61 +548,50 @@ class PrepEngine:
                 ]
 
         logger.warning(
-            "Prep guide generation failed after %d attempts (%s); "
-            "returning fallback guide.",
+            "Prep guide generation failed after %d attempts (%s).",
             settings.prep_retries,
             last_error,
         )
-        return load_fallback_guide()
+        logger.debug("Final prep generation error: %s", last_error)
+        raise PrepGuideError(
+            f"LLM unavailable after {settings.prep_retries} attempts. "
+            "Retry later, or enable Fast Mode for a clearly labelled demo guide."
+        )
 
-    def _retrieve_all(self, query: str) -> str:
-        """Fetch a broad context window across sources for prompt injection."""
-        embedder = get_embedder()
+    def _retrieve_all(
+        self, query: str, source: str, bounded: bool = True
+    ) -> str:
+        """Rank source-scoped chunks by the query and format prompt context.
+
+        JD context is deliberately unbounded: silently truncating requirements
+        produces guides that miss explicit must-haves.
+        """
         collection = self._collection()
         try:
-            results = collection.get(limit=200)
+            embedder = get_embedder()
+            embedding = embedder.encode([query], convert_to_numpy=True).tolist()
+            results = collection.query(
+                query_embeddings=embedding,
+                n_results=settings.rag_max_chunks if bounded else 1000,
+                where={"source": source},
+            )
         except Exception as exc:  # pragma: no cover
-            logger.warning("Collection get failed: %s", exc)
+            logger.warning("Collection query failed: %s", exc)
             return ""
         docs = results.get("documents") or []
         metas = results.get("metadatas") or []
-        if not docs:
-            return ""
-        lines = []
-        for doc, meta in zip(docs, metas):
-            source = (meta or {}).get("source", "?")
-            lines.append(f"[{source}] {doc}")
-        return "\n".join(lines[:60])
-
-    @staticmethod
-    def _fallback_guide(context: str) -> Dict[str, Any]:
-        """Deterministic fallback guide when no LLM API key is configured."""
-        logger.warning("No OPENAI_API_KEY configured; returning fallback guide.")
-        sample_question = {
-            "question": (
-                "Tell me about a project where you overcame a significant challenge. "
-                "(Adjust this template based on your CV and the JD.)"
-            ),
-            "answer": (
-                "S: The project goals and context. T: My specific responsibility. "
-                "A: The concrete actions I took and decisions I made. R: The measurable "
-                "outcome and what I learned. Ground every element in a real example "
-                "from your CV."
-            ),
-        }
-        return {
-            "technical_questions": [sample_question] * 5,
-            "behavioral_questions": [sample_question] * 3,
-            "positioning_tips": [
-                "Map one quantifiable CV accomplishment to the company's flagship metric.",
-                "Mirror the company's vocabulary from its mission and job posting.",
-                "Prepare 2 questions that reference specifics from the company overview.",
-                "Front-load the skills the JD repeats most often.",
-                "Ask about the team's definition of success for this role in your first 90 days.",
-            ],
-            "skill_gaps": [
-                "Compare the JD's required skills against your CV; list anything missing, "
-                "and prepare a learning roadmap for each."
-            ],
-            "_fallback": True,
-        }
+        flat_docs = docs[0] if docs and isinstance(docs[0], list) else docs
+        flat_metas = metas[0] if metas and isinstance(metas[0], list) else metas
+        lines: List[str] = []
+        used = 0
+        for index, doc in enumerate(flat_docs):
+            meta = flat_metas[index] if index < len(flat_metas) else {}
+            label = (meta or {}).get("source", source)
+            line = f"[{label}] {doc}"
+            if bounded and used + len(line) > settings.rag_context_chars:
+                break
+            lines.append(line)
+            used += len(line) + 1
+        if not bounded and len(flat_docs) > len(lines):
+            logger.warning("Retrieved only %d of many JD chunks.", len(lines))
+        return "\n".join(lines)

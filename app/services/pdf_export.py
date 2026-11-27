@@ -4,14 +4,22 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 import unicodedata
 import uuid
+from pathlib import Path
 from typing import Any, Dict
 
+import arabic_reshaper
+from bidi.algorithm import get_display
 from fpdf import FPDF
 from fpdf.enums import XPos, YPos
 
+from ..config import settings
+
 logger = logging.getLogger(__name__)
+
+_FONT_FAMILY = "helvetica"
 
 # Common smart/typographic characters that are NOT representable in the
 # latin-1 range used by fpdf2's built-in core fonts. It is helpful to map
@@ -51,38 +59,80 @@ _TYPOGRAPHIC_MAP = {
 
 
 def sanitize_pdf_text(text: Any) -> str:
-    """Return a latin-1-safe rendering of arbitrary LLM output text.
-
-    Smart punctuation and common symbols are normalized to portable
-    equivalents; anything else that cannot be represented in latin-1 is
-    decomposed to its closest latin-1 characters or dropped.
-    """
+    """Normalize text and apply Arabic shaping/RTL display order for PDFs."""
     if text is None:
         return ""
     s = unicodedata.normalize("NFKC", str(text))
     for src, dst in _TYPOGRAPHIC_MAP.items():
         s = s.replace(src, dst)
+    try:
+        s = get_display(arabic_reshaper.reshape(s))
+    except Exception:
+        logger.warning("Arabic shaping failed for PDF text; using plain text.")
+    return s
 
-    safe: list[str] = []
-    for ch in s:
-        if ord(ch) <= 0xFF:
-            safe.append(ch)
-            continue
-        decomposed = "".join(
-            c for c in unicodedata.normalize("NFKD", ch) if ord(c) <= 0xFF
+
+def _find_font(filename: str) -> Path | None:
+    candidates = [
+        os.getenv("PDF_FONT_PATH", ""),
+        str(Path(__file__).resolve().parents[2] / "assets" / "fonts" / filename),
+        "/usr/share/fonts/truetype/dejavu/" + filename,
+        "C:/Windows/Fonts/" + filename.replace("DejaVuSans", "DejaVuSans"),
+    ]
+    try:
+        import matplotlib
+
+        candidates.append(
+            str(
+                Path(matplotlib.__file__).resolve().parent
+                / "mpl-data/fonts/ttf"
+                / filename
+            )
         )
-        safe.append(decomposed or "?")
-    return "".join(safe).encode("latin-1", errors="replace").decode("latin-1")
+    except ImportError:  # pragma: no cover - optional font source
+        pass
+    for raw in candidates:
+        if raw and Path(raw).is_file():
+            return Path(raw)
+    return None
+
+
+def _register_unicode_font() -> str:
+    global _FONT_FAMILY
+    if _find_font("DejaVuSans.ttf") is None:
+        logger.warning("Unicode PDF font not found; falling back to core fonts.")
+        return _FONT_FAMILY
+    _FONT_FAMILY = "Unicode"
+    return _FONT_FAMILY
+
+
+def _add_unicode_fonts(pdf: FPDF) -> None:
+    regular = _find_font("DejaVuSans.ttf")
+    if regular is None:
+        return
+    styles = {
+        "": regular,
+        "B": _find_font("DejaVuSans-Bold.ttf") or regular,
+        "I": _find_font("DejaVuSans-Oblique.ttf") or regular,
+        "BI": _find_font("DejaVuSans-BoldOblique.ttf") or regular,
+    }
+    for style, path in styles.items():
+        pdf.add_font("Unicode", style, str(path))
 
 
 class _PrepGuidePDF(FPDF):
     """A4 PDF with a footer page counter."""
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if _FONT_FAMILY == "Unicode":
+            _add_unicode_fonts(self)
+
     def footer(self) -> None:
         if self.page_no() == 0:
             return
         self.set_y(-15)
-        self.set_font("helvetica", "I", 8)
+        self.set_font(_FONT_FAMILY, "I", 8)
         self.set_text_color(130, 140, 150)
         self.cell(0, 10, f"Page {self.page_no()}", align="C")
 
@@ -98,15 +148,36 @@ def _qa_pairs(items: Any) -> list[tuple[str, str]]:
     return pairs
 
 
-def build_prep_guide_pdf(guide: Dict[str, Any], output_dir: str) -> str:
+def cleanup_old_pdfs(output_dir: str, ttl_hours: int = 48) -> None:
+    """Delete generated PDFs older than their time-to-live."""
+    if not os.path.isdir(output_dir):
+        return
+    cutoff = time.time() - ttl_hours * 3600
+    for name in os.listdir(output_dir):
+        if not name.startswith("prep_guide_") or not name.endswith(".pdf"):
+            continue
+        path = os.path.join(output_dir, name)
+        try:
+            if os.path.getmtime(path) < cutoff:
+                os.remove(path)
+                logger.info("Removed expired PDF %s", path)
+        except OSError as exc:  # pragma: no cover - best effort cleanup
+            logger.warning("Could not remove expired PDF %s: %s", path, exc)
+
+
+def build_prep_guide_pdf(
+    guide: Dict[str, Any], output_dir: str, demo: bool = False
+) -> str:
     """Render a prep guide dict into a PDF file and return its absolute path."""
+    cleanup_old_pdfs(output_dir, ttl_hours=settings.pdf_ttl_hours)
+    _register_unicode_font()
     pdf = _PrepGuidePDF(format="A4")
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.set_margins(12, 12, 12)
     pdf.add_page()
 
     # Header
-    pdf.set_font("helvetica", "B", 18)
+    pdf.set_font(_FONT_FAMILY, "B", 18)
     pdf.set_text_color(26, 42, 74)
     pdf.multi_cell(
         0, 10, sanitize_pdf_text("Interviewly - Interview Preparation Guide"),
@@ -116,7 +187,7 @@ def build_prep_guide_pdf(guide: Dict[str, Any], output_dir: str) -> str:
     pdf.set_line_width(0.6)
     pdf.line(12, pdf.get_y(), pdf.w - 12, pdf.get_y())
     pdf.ln(6)
-    pdf.set_font("helvetica", "I", 10)
+    pdf.set_font(_FONT_FAMILY, "I", 10)
     pdf.set_text_color(90, 90, 90)
     pdf.multi_cell(
         0, 6,
@@ -127,11 +198,22 @@ def build_prep_guide_pdf(guide: Dict[str, Any], output_dir: str) -> str:
         new_x=XPos.LMARGIN, new_y=YPos.NEXT,
     )
     pdf.ln(4)
+    if demo or guide.get("_fallback"):
+        pdf.set_font(_FONT_FAMILY, "B", 11)
+        pdf.set_text_color(180, 40, 40)
+        pdf.multi_cell(
+            0, 7,
+            sanitize_pdf_text(
+                "DEMO DATA - not based on your CV or the job description."
+            ),
+            new_x=XPos.LMARGIN, new_y=YPos.NEXT,
+        )
+        pdf.ln(2)
     pdf.set_text_color(0, 0, 0)
 
     def section(title: str) -> None:
         pdf.ln(2)
-        pdf.set_font("helvetica", "B", 13)
+        pdf.set_font(_FONT_FAMILY, "B", 13)
         pdf.set_fill_color(26, 42, 74)
         pdf.set_text_color(255, 255, 255)
         pdf.cell(
@@ -144,7 +226,7 @@ def build_prep_guide_pdf(guide: Dict[str, Any], output_dir: str) -> str:
     def question_block(index: int, question: str, answer: str) -> None:
         question = sanitize_pdf_text(question)
         answer = sanitize_pdf_text(answer)
-        pdf.set_font("helvetica", "B", 11)
+        pdf.set_font(_FONT_FAMILY, "B", 11)
         pdf.set_text_color(26, 42, 74)
         pdf.multi_cell(
             0, 6, f"{index}. {question}",
@@ -152,13 +234,13 @@ def build_prep_guide_pdf(guide: Dict[str, Any], output_dir: str) -> str:
         )
         pdf.set_text_color(0, 0, 0)
         if answer:
-            pdf.set_font("helvetica", "I", 10)
+            pdf.set_font(_FONT_FAMILY, "I", 10)
             pdf.set_text_color(120, 110, 90)
             pdf.multi_cell(
                 0, 5, "STAR model answer:", new_x=XPos.LMARGIN, new_y=YPos.NEXT
             )
             pdf.set_text_color(0, 0, 0)
-            pdf.set_font("helvetica", "", 10)
+            pdf.set_font(_FONT_FAMILY, "", 10)
             pdf.multi_cell(
                 0, 5, answer, new_x=XPos.LMARGIN, new_y=YPos.NEXT
             )
@@ -177,7 +259,7 @@ def build_prep_guide_pdf(guide: Dict[str, Any], output_dir: str) -> str:
         question_block(i, question, answer)
 
     section("Company-Specific Positioning Tips")
-    pdf.set_font("helvetica", "", 10)
+    pdf.set_font(_FONT_FAMILY, "", 10)
     for i, tip in enumerate(guide.get("positioning_tips") or [], start=1):
         if isinstance(tip, str) and tip.strip():
             pdf.multi_cell(
@@ -187,7 +269,7 @@ def build_prep_guide_pdf(guide: Dict[str, Any], output_dir: str) -> str:
     pdf.ln(3)
 
     section("Skill-Gap Analysis")
-    pdf.set_font("helvetica", "", 10)
+    pdf.set_font(_FONT_FAMILY, "", 10)
     for gap in guide.get("skill_gaps") or []:
         if isinstance(gap, str) and gap.strip():
             pdf.multi_cell(

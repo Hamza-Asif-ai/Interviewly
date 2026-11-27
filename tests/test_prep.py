@@ -123,19 +123,6 @@ class TestPrepEngine:
         assert "CustomerSrviceDept.(3Months) || FrontendDeveloper" in sheet
         assert "June2023-August2023 || August2024" in sheet
 
-    def test_fallback_guide_shape(self) -> None:
-        ctx = "Some context text"
-        guide = PrepEngine._fallback_guide(ctx)
-        assert len(guide["technical_questions"]) == 5
-        assert len(guide["behavioral_questions"]) == 3
-        assert len(guide["positioning_tips"]) == 5
-        assert isinstance(guide["skill_gaps"], list)
-
-    def test_fallback_answers_are_star(self) -> None:
-        guide = PrepEngine._fallback_guide("ctx")
-        answer = guide["technical_questions"][0]["answer"]
-        assert "S:" in answer and "R:" in answer
-
     def test_index_and_generate_offline(self, tmp_path) -> None:
         """Index documents and generate a guide without an LLM API key."""
         try:
@@ -183,11 +170,11 @@ class TestPDFExport:
             "skill_gaps": ["\u00c9l\u00e9ments Docker are missing \u2026"],
         }
 
-    def test_sanitize_keeps_latin1_within_bounds(self) -> None:
+    def test_sanitize_keeps_unicode_text(self) -> None:
         text = "caf\u00e9 \u266f \u2014 \u2018quotes\u2019 \u2022 bullet \u2605 \U0001f600"
         out = sanitize_pdf_text(text)
-        assert "caf" in out
-        assert all(ord(ch) <= 0xFF for ch in out)
+        assert "caf\u00e9" in out
+        assert "?" not in out
 
     def test_sanitize_maps_smart_punctuation(self) -> None:
         assert sanitize_pdf_text("\u201cquoted\u201d") == '"quoted"'

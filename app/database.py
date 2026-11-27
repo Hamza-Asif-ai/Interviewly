@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Generator
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from .config import settings
@@ -28,6 +28,15 @@ def init_db() -> None:
     from . import models  # noqa: F401  (ensure models are registered)
 
     Base.metadata.create_all(bind=engine)
+    inspector = inspect(engine)
+    # Safe additive migration: older databases have no per-record access tokens.
+    for table in ("prep_guides", "analysis_reports"):
+        if table not in inspector.get_table_names():
+            continue
+        columns = {column["name"] for column in inspector.get_columns(table)}
+        if "access_token" not in columns:
+            with engine.begin() as connection:
+                connection.execute(text(f"ALTER TABLE {table} ADD COLUMN access_token VARCHAR(64)"))
 
 
 def get_db() -> Generator[Session, None, None]:

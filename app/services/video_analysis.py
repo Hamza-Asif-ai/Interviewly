@@ -5,33 +5,46 @@ from __future__ import annotations
 import logging
 import math
 import os
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 # MediaPipe face-mesh landmark indices used for head-pose estimation.
+# Sides are the subject's: in an unmirrored image the subject's right eye
+# appears on the viewer's left (smaller x).
 _NOSE_TIP = 1
 _CHIN = 152
-_LEFT_EYE_OUTER = 33
-_RIGHT_EYE_OUTER = 263
-_LEFT_MOUTH = 61
-_RIGHT_MOUTH = 291
+_RIGHT_EYE_OUTER = 33
+_LEFT_EYE_OUTER = 263
+_RIGHT_MOUTH = 61
+_LEFT_MOUTH = 291
 
 _POSE_LEFT_SHOULDER = 11
 _POSE_RIGHT_SHOULDER = 12
 
 # Canonical 3D facial points (approximate head geometry in cm) used with solvePnP.
+# MediaPipe's y axis points down and its z axis points out of the image, hence
+# the sign flip relative to a conventional right-handed head model.
 _FACE_3D = {
     _NOSE_TIP: (0.0, 0.0, 0.0),
-    _CHIN: (0.0, -30.0, -20.0),
-    _LEFT_EYE_OUTER: (-30.0, 20.0, -20.0),
-    _RIGHT_EYE_OUTER: (30.0, 20.0, -20.0),
-    _LEFT_MOUTH: (-20.0, -20.0, -30.0),
-    _RIGHT_MOUTH: (20.0, -20.0, -30.0),
+    _CHIN: (0.0, 30.0, 20.0),
+    _RIGHT_EYE_OUTER: (-30.0, -20.0, 20.0),
+    _LEFT_EYE_OUTER: (30.0, -20.0, 20.0),
+    _RIGHT_MOUTH: (-20.0, 20.0, 30.0),
+    _LEFT_MOUTH: (20.0, 20.0, 30.0),
 }
 
 EYE_CONTACT_YAW_CONE = 25.0  # degrees
 EYE_CONTACT_PITCH_CONE = 20.0  # degrees
+
+
+def _is_eye_contact(yaw: float, pitch: float) -> bool:
+    """Whether head yaw and pitch (degrees) fall inside the frontal cone."""
+    return (
+        abs(yaw) <= EYE_CONTACT_YAW_CONE
+        and abs(pitch) <= EYE_CONTACT_PITCH_CONE
+    )
 
 
 def _pose_from_face_landmarks(
@@ -46,19 +59,18 @@ def _pose_from_face_landmarks(
     def lp(index: int) -> Any:
         return landmarks.landmark[index]
 
+    point_order = (
+        _NOSE_TIP, _CHIN, _RIGHT_EYE_OUTER, _LEFT_EYE_OUTER,
+        _RIGHT_MOUTH, _LEFT_MOUTH,
+    )
     points_2d = np.array(
         [
             [lp(i).x * frame_width, lp(i).y * frame_height]
-            for i in (_NOSE_TIP, _CHIN, _LEFT_EYE_OUTER, _RIGHT_EYE_OUTER,
-                      _LEFT_MOUTH, _RIGHT_MOUTH)
+            for i in point_order
         ],
         dtype=np.float64,
     )
-    points_3d = np.array(
-        [_FACE_3D[i] for i in (_NOSE_TIP, _CHIN, _LEFT_EYE_OUTER,
-                               _RIGHT_EYE_OUTER, _LEFT_MOUTH, _RIGHT_MOUTH)],
-        dtype=np.float64,
-    )
+    points_3d = np.array([_FACE_3D[i] for i in point_order], dtype=np.float64)
     focal_length = frame_width
     camera_matrix = np.array(
         [
@@ -79,10 +91,8 @@ def _pose_from_face_landmarks(
     if not success:
         return 0.0, 0.0
     rotation_mat, _ = cv2.Rodrigues(rotation_vec)
-    yaw = math.degrees(math.atan2(rotation_mat[1, 0], rotation_mat[0, 0]))
-    pitch = math.degrees(
-        math.asin(-rotation_mat[2, 0])
-    )
+    yaw = math.degrees(math.asin(float(np.clip(-rotation_mat[2, 0], -1, 1))))
+    pitch = math.degrees(math.atan2(rotation_mat[2, 1], rotation_mat[2, 2]))
     return float(yaw), float(pitch)
 
 
@@ -106,9 +116,13 @@ def analyze_video(video_path: str) -> Dict[str, Any]:
         posture_stability_score - 0-10 based on shoulder-tilt variance
         head_movement_score     - 0-10 based on head yaw variance
         frames_analyzed         - number of sampled frames
+        face_frames             - number of sampled frames with a detected face
+        analysis_available      - False when OpenCV/MediaPipe could not analyse
     """
     if not os.path.exists(video_path):
         raise FileNotFoundError(f"Video file not found: {video_path}")
+
+    start = time.perf_counter()
 
     try:
         import cv2
@@ -123,19 +137,23 @@ def analyze_video(video_path: str) -> Dict[str, Any]:
             "posture_stability_score": 0.0,
             "head_movement_score": 0.0,
             "frames_analyzed": 0,
+            "face_frames": 0,
+            "analysis_available": False,
         }
 
     capture = cv2.VideoCapture(video_path)
     if not capture.isOpened():
         raise ValueError(f"Could not open video: {video_path}")
 
-    fps = float(capture.get(cv2.CAP_PROP_FPS)) or 30.0
+    raw_fps = float(capture.get(cv2.CAP_PROP_FPS))
+    fps = (
+        raw_fps if math.isfinite(raw_fps) and 0 < raw_fps <= 1000 else 30.0
+    )
     frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
     if frame_count <= 0:
-        capture.release()
-        raise ValueError(f"Video has no frames: {video_path}")
-
-    sample_indices = {int(i * fps) for i in range(int(frame_count / fps) + 1)}
+        logger.warning(
+            "Video frame count is unknown (%d); sampling by timestamp.", frame_count
+        )
 
     face_frames = 0
     eye_contact_frames = 0
@@ -144,23 +162,47 @@ def analyze_video(video_path: str) -> Dict[str, Any]:
     shoulder_tilts: List[float] = []
     frames_analyzed = 0
 
-    holistic = mp_holistic.Holistic(
-        static_image_mode=False,
-        model_complexity=0,
-        refine_face_landmarks=True,
-        min_detection_confidence=0.5,
-        min_tracking_confidence=0.5,
-    )
+    holistic = None
+    try:
+        holistic = mp_holistic.Holistic(
+            static_image_mode=False,
+            model_complexity=0,
+            refine_face_landmarks=True,
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5,
+        )
+    except Exception as exc:  # noqa: BLE001 - never crash on model init failure
+        logger.warning(
+            "MediaPipe Holistic init failed (%s); skipping visual analysis.", exc
+        )
+        capture.release()
+        return {
+            "face_detection_percent": 0.0,
+            "eye_contact_percent": 0.0,
+            "posture_stability_score": 0.0,
+            "head_movement_score": 0.0,
+            "frames_analyzed": 0,
+            "face_frames": 0,
+            "analysis_available": False,
+        }
 
     try:
         index = 0
+        next_sample_at = 0.0
         while True:
             ok, frame = capture.read()
             if not ok:
                 break
-            if index not in sample_indices:
+            timestamp_ms = float(capture.get(cv2.CAP_PROP_POS_MSEC))
+            timestamp = (
+                timestamp_ms / 1000.0
+                if math.isfinite(timestamp_ms) and timestamp_ms >= 0
+                else index / fps
+            )
+            if timestamp + 1e-6 < next_sample_at:
                 index += 1
                 continue
+            next_sample_at = timestamp + 1.0
 
             height, width, _ = frame.shape
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -173,10 +215,7 @@ def analyze_video(video_path: str) -> Dict[str, Any]:
                 yaw, pitch = _pose_from_face_landmarks(face_landmarks, width, height)
                 yaws.append(yaw)
                 pitches.append(pitch)
-                if (
-                    abs(yaw) <= EYE_CONTACT_YAW_CONE
-                    and abs(pitch) <= EYE_CONTACT_PITCH_CONE
-                ):
+                if _is_eye_contact(yaw, pitch):
                     eye_contact_frames += 1
 
             pose_landmarks = results.pose_landmarks
@@ -215,10 +254,13 @@ def analyze_video(video_path: str) -> Dict[str, Any]:
         face_detection_percent,
         eye_contact_percent,
     )
+    logger.info("MediaPipe analysis took %.2fs", time.perf_counter() - start)
     return {
         "face_detection_percent": face_detection_percent,
         "eye_contact_percent": eye_contact_percent,
         "posture_stability_score": posture_stability_score,
         "head_movement_score": head_movement_score,
         "frames_analyzed": frames_analyzed,
+        "face_frames": face_frames,
+        "analysis_available": True,
     }

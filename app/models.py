@@ -58,6 +58,9 @@ class PrepGuide(Base):
     job_description: Mapped[str] = mapped_column(Text)
     company_overview: Mapped[str] = mapped_column(Text, default="")
     guide_json: Mapped[str] = mapped_column(Text)
+    access_token: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, index=True, default=None
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 
     session: Mapped["Session"] = relationship(back_populates="prep_guides")
@@ -97,6 +100,9 @@ class AnalysisReport(Base):
     )
     transcript: Mapped[str] = mapped_column(Text, default="")
     report_json: Mapped[str] = mapped_column(Text)
+    access_token: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, index=True, default=None
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 
     video: Mapped["PracticeVideo"] = relationship(back_populates="report")

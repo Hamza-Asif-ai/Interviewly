@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import hmac
 import json
 import logging
 import os
+import secrets
 import uuid
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
 from ..config import settings
@@ -15,7 +17,7 @@ from ..database import get_db
 from ..models import PrepGuide as PrepGuideModel
 from ..models import Session as DBSession
 from ..services.cv_parser import extract_text_from_file, CVParseError
-from ..services.prep_engine import PrepEngine
+from ..services.prep_engine import PrepEngine, PrepGuideError, load_fallback_guide
 from ..schemas import PrepGuide as PrepGuideSchema
 from ..schemas import PrepGuideResponse, Question
 from starlette.concurrency import run_in_threadpool
@@ -47,8 +49,13 @@ async def _save_upload(file: UploadFile, extension: str) -> str:
 @router.post("/generate", response_model=PrepGuideResponse)
 async def generate_prep_guide(
     cv_file: UploadFile = File(...),
-    job_description: str = Form(..., min_length=1),
-    company_overview: str = Form(default=""),
+    job_description: str = Form(
+        ..., min_length=1, max_length=settings.max_input_chars
+    ),
+    company_overview: str = Form(
+        default="", max_length=settings.max_input_chars
+    ),
+    fast_mode: bool = Form(default=False),
     db: Session = Depends(get_db),
 ) -> PrepGuideResponse:
     """Generate a preparation guide from a CV, job description, and company overview."""
@@ -69,39 +76,68 @@ async def generate_prep_guide(
         if os.path.exists(saved_path):
             os.remove(saved_path)  # CV text is embedded; raw file not retained
 
-    session = DBSession(title="Prep session")
-    db.add(session)
-    db.flush()  # obtain session.id
-
-    engine = PrepEngine(str(session.id))
-    try:
-        await run_in_threadpool(
-            engine.index_documents, cv_text, job_description, company_overview
+    if len(cv_text) > settings.max_input_chars:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Extracted CV text exceeds {settings.max_input_chars} characters.",
         )
-        guide_data = await engine.generate()
-    except Exception as exc:
+
+    engine_session_id = uuid.uuid4().hex
+    engine = PrepEngine(engine_session_id)
+    try:
+        if fast_mode:
+            logger.info("Fast Mode: serving clearly labelled demo prep guide.")
+            guide_data = load_fallback_guide()
+        else:
+            await run_in_threadpool(
+                engine.index_documents, cv_text, job_description, company_overview
+            )
+            guide_data = await engine.generate()
+    except PrepGuideError as exc:
+        logger.warning("Prep generation unavailable: %s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "LLM unavailable. Retry later, or enable Fast Mode for a demo "
+                "guide that is explicitly not based on your CV."
+            ),
+        ) from exc
+    except Exception:
         logger.exception("Prep generation failed.")
-        raise HTTPException(status_code=500, detail=f"Prep generation failed: {exc}") from exc
+        raise HTTPException(
+            status_code=500, detail="Prep generation failed. Please retry shortly."
+        )
+    finally:
+        await run_in_threadpool(engine.cleanup)
 
     if not isinstance(guide_data, dict):
         raise HTTPException(status_code=500, detail="Model returned an unexpected guide shape.")
 
     guide_json = json.dumps(guide_data)
+    access_token = secrets.token_urlsafe(24)
+    # One short transaction after generation: no DB row is held open while
+    # embeddings or the LLM are running.
+    session = DBSession(title="Prep session")
+    db.add(session)
+    db.flush()  # obtain session.id
     guide = PrepGuideModel(
         session_id=session.id,
         cv_filename=cv_file.filename or "cv",
         job_description=job_description,
         company_overview=company_overview,
         guide_json=guide_json,
+        access_token=access_token,
     )
     db.add(guide)
     db.commit()
     db.refresh(guide)
 
-    return _to_response(guide)
+    return _to_response(guide, include_token=access_token)
 
 
-def _to_response(guide: PrepGuideModel) -> PrepGuideResponse:
+def _to_response(
+    guide: PrepGuideModel, include_token: str | None = None
+) -> PrepGuideResponse:
     """Convert an ORM PrepGuide into the response schema."""
     data = json.loads(guide.guide_json)
     technical = [Question(**item) for item in data.get("technical_questions", [])]
@@ -118,13 +154,24 @@ def _to_response(guide: PrepGuideModel) -> PrepGuideResponse:
             skill_gaps=data.get("skill_gaps", []),
         ),
         created_at=str(guide.created_at.isoformat()) if guide.created_at else None,
+        access_token=include_token,
     )
 
 
-@router.get("/{guide_id}", response_model=PrepGuideResponse)
-def get_prep_guide(guide_id: int, db: Session = Depends(get_db)) -> PrepGuideResponse:
-    """Return a previously generated prep guide by id."""
+@router.get(
+    "/{guide_id}", response_model=PrepGuideResponse, response_model_exclude_none=True
+)
+def get_prep_guide(
+    guide_id: int,
+    x_access_token: str | None = Header(default=None, alias="X-Access-Token"),
+    db: Session = Depends(get_db),
+) -> PrepGuideResponse:
+    """Return a previously generated prep guide by id, if the token matches."""
     guide = db.get(PrepGuideModel, guide_id)
-    if guide is None:
+    if guide is None or not guide.access_token:
+        raise HTTPException(status_code=404, detail="Prep guide not found.")
+    if not x_access_token or not hmac.compare_digest(
+        guide.access_token, x_access_token
+    ):
         raise HTTPException(status_code=404, detail="Prep guide not found.")
     return _to_response(guide)

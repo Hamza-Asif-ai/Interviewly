@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import hmac
 import json
 import logging
 import os
+import secrets
 import uuid
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
 from ..config import settings
@@ -22,6 +24,12 @@ from ..services import (
     transcribe_audio,
     extract_audio_from_video,
 )
+from ..services.transcription import (
+    NoSpeechError,
+    TranscriptionError,
+    normalize_transcription,
+    probe_media,
+)
 from starlette.concurrency import run_in_threadpool
 
 logger = logging.getLogger(__name__)
@@ -29,6 +37,24 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/practice", tags=["practice"])
 
 VIDEO_EXTENSIONS = (".mp4", ".mov", ".avi", ".mkv", ".webm")
+MIN_TRANSCRIPT_WORDS = 3
+SUPPORTED_LANGUAGES = {"", "en", "ur"}
+
+_FORMAT_HINTS = {
+    ".mp4": ("mp4", "mov"),
+    ".mov": ("mov", "mp4"),
+    ".mkv": ("matroska",),
+    ".webm": ("webm",),
+    ".avi": ("avi",),
+}
+
+
+def _extension_matches_format(extension: str, format_name: str) -> bool:
+    """Detect files whose extension lies about the actual container format."""
+    hints = _FORMAT_HINTS.get(extension)
+    if not hints or not format_name:
+        return True
+    return any(hint in format_name.lower() for hint in hints)
 
 
 async def _save_video(file: UploadFile, extension: str) -> str:
@@ -63,11 +89,15 @@ def _cleanup(paths) -> None:
 @router.post("/upload")
 async def upload_practice_video(
     video_file: UploadFile = File(...),
-    session_id: int = Form(default=0),
-    question_prompt: str = Form(default=""),
+    question_prompt: str = Form(default="", max_length=settings.max_input_chars),
+    language: str = Form(default=""),
     db: Session = Depends(get_db),
 ) -> dict:
     """Analyze a practice video and return a full diagnostic scorecard."""
+    if language not in SUPPORTED_LANGUAGES:
+        raise HTTPException(
+            status_code=422, detail="language must be empty, 'en' or 'ur'."
+        )
     extension = os.path.splitext(video_file.filename or "")[1].lower()
     if extension not in VIDEO_EXTENSIONS:
         raise HTTPException(
@@ -81,30 +111,63 @@ async def upload_practice_video(
     )
 
     try:
+        probe = await run_in_threadpool(probe_media, video_path)
+        if not probe.get("valid"):
+            raise HTTPException(
+                status_code=422,
+                detail=probe.get("error") or "Invalid or corrupt video file.",
+            )
+        if not probe.get("skipped"):
+            if not probe.get("has_video"):
+                raise HTTPException(status_code=422, detail="File has no video stream.")
+            if not probe.get("has_audio"):
+                raise HTTPException(status_code=422, detail="Video has no audio track.")
+            if not _extension_matches_format(
+                extension, str(probe.get("format_name") or "")
+            ):
+                raise HTTPException(
+                    status_code=422,
+                    detail="File extension does not match its contents.",
+                )
+
         await run_in_threadpool(extract_audio_from_video, video_path, audio_path)
         duration = await _probe_duration(audio_path)
 
-        transcript = await run_in_threadpool(transcribe_audio, audio_path)
+        transcription = normalize_transcription(
+            await run_in_threadpool(transcribe_audio, audio_path, language)
+        )
+        transcript = transcription.original
+        display_text = transcription.display_text
+        if len(transcript.split()) < MIN_TRANSCRIPT_WORDS:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "No speech detected: the transcript had fewer than "
+                    f"{MIN_TRANSCRIPT_WORDS} words."
+                ),
+            )
 
         text_metrics, speech_metrics, visual_metrics = await _run_analysis(
-            transcript, audio_path, video_path, duration, question_prompt
+            display_text, transcript, audio_path, video_path, duration, question_prompt
         )
         scorecard = build_scorecard(text_metrics, speech_metrics, visual_metrics)
         review = await analyze_report_with_llm(scorecard)
 
+        access_token = secrets.token_urlsafe(24)
         report = AnalysisReport(
             video_id=0,
             transcript=transcript,
-            report_json=json.dumps({**scorecard, **review}),
+            report_json=json.dumps(
+                {**scorecard, **review, "transcript_display": display_text}
+            ),
+            access_token=access_token,
         )
 
-        saved_session = None
-        if session_id and session_id > 0:
-            saved_session = db.get(DBSession, session_id)
-        if saved_session is None:
-            saved_session = DBSession(title="Practice session")
-            db.add(saved_session)
-            db.flush()
+        # A fresh session is always created; clients never choose whose session
+        # a report is attached to.
+        saved_session = DBSession(title="Practice session")
+        db.add(saved_session)
+        db.flush()
 
         video = PracticeVideo(
             session_id=saved_session.id,
@@ -122,10 +185,29 @@ async def upload_practice_video(
         db.commit()
         db.refresh(report)
         db.refresh(video)
-    except Exception as exc:
+    except HTTPException:
+        _cleanup([video_path, audio_path])
+        raise
+    except NoSpeechError as exc:
+        logger.warning("No speech detected: %s", exc)
+        _cleanup([video_path, audio_path])
+        raise HTTPException(
+            status_code=422,
+            detail="No speech detected. Record again with clear audio and retry.",
+        ) from exc
+    except TranscriptionError as exc:
+        logger.warning("Transcription unavailable: %s", exc)
+        _cleanup([video_path, audio_path])
+        raise HTTPException(
+            status_code=503,
+            detail="Transcription unavailable. Upload a video with clear audio and retry.",
+        ) from exc
+    except Exception:
         logger.exception("Practice analysis failed.")
         _cleanup([video_path, audio_path])
-        raise HTTPException(status_code=500, detail=f"Analysis failed: {exc}") from exc
+        raise HTTPException(
+            status_code=500, detail="Analysis failed. Please retry shortly."
+        )
 
     # Privacy: local video/audio deleted immediately after processing.
     _cleanup([video_path, audio_path])
@@ -136,7 +218,9 @@ async def upload_practice_video(
         "video_id": video.id,
         "duration_seconds": video.duration_seconds,
         "transcript": transcript,
+        "transcript_display": display_text,
         "scorecard": result,
+        "access_token": access_token,
     }
 
 
@@ -148,6 +232,7 @@ async def _probe_duration(wav_path: str) -> float:
 
 
 async def _run_analysis(
+    scoring_text: str,
     transcript: str,
     audio_path: str,
     video_path: str,
@@ -157,8 +242,11 @@ async def _run_analysis(
     """Run text, audio and video analysis concurrently."""
     import asyncio
 
-    text_task = asyncio.create_task(analyze_text(transcript, duration, question_prompt))
-    audio_task = run_in_threadpool(analyze_audio, audio_path)
+    text_task = asyncio.create_task(
+        analyze_text(transcript, duration, question_prompt, scoring_text=scoring_text)
+    )
+    word_count = len(transcript.split())
+    audio_task = run_in_threadpool(analyze_audio, audio_path, word_count)
     video_task = run_in_threadpool(analyze_video, video_path)
     text_metrics, speech_metrics, visual_metrics = await asyncio.gather(
         text_task, audio_task, video_task
@@ -168,21 +256,26 @@ async def _run_analysis(
 
 @router.get("/{video_id}/report")
 def get_practice_report(
-    video_id: int, db: Session = Depends(get_db)
+    video_id: int,
+    x_access_token: str | None = Header(default=None, alias="X-Access-Token"),
+    db: Session = Depends(get_db),
 ) -> dict:
-    """Return the saved analysis report for a practice video."""
+    """Return the saved analysis report for a practice video, if the token matches."""
     video = db.get(PracticeVideo, video_id)
-    if video is None:
-        raise HTTPException(status_code=404, detail="Practice video not found.")
-    if video.report is None:
-        raise HTTPException(status_code=404, detail="No report generated for this video.")
+    if video is None or video.report is None or not video.report.access_token:
+        raise HTTPException(status_code=404, detail="Practice report not found.")
     report = video.report
+    if not x_access_token or not hmac.compare_digest(
+        report.access_token, x_access_token
+    ):
+        raise HTTPException(status_code=404, detail="Practice report not found.")
     data = json.loads(report.report_json)
     return {
         "id": report.id,
         "video_id": video.id,
         "duration_seconds": video.duration_seconds,
         "transcript": report.transcript,
+        "transcript_display": data.get("transcript_display", report.transcript),
         "question_prompt": video.question_prompt,
         "created_at": str(report.created_at.isoformat()) if report.created_at else None,
         "scorecard": data,

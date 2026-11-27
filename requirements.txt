@@ -4,6 +4,7 @@ wheel
 
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
+gunicorn==23.0.0
 python-multipart==0.0.20
 pydantic==2.10.4
 python-dotenv==1.0.1
@@ -46,6 +47,6 @@ python-docx==1.1.2
 
 # PDF export
 fpdf2==2.8.1
-
-# Testing
-pytest==8.3.4
+arabic-reshaper==3.1.0
+python-bidi==0.6.0
+matplotlib==3.11.2
