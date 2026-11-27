@@ -421,5 +421,3 @@ BS Artificial Intelligence — DUET, Karachi
 [![LinkedIn](https://img.shields.io/badge/LinkedIn-Hamza%20Asif-blue?style=flat-square&logo=linkedin)](https://linkedin.com/in/hamza-asif-ai)
 
 ---
-
-> **Render environment variables** — on your Render Web Service, set: `OPENAI_API_KEY`, `OPENAI_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai/`, `LLM_MODEL=gemini-3.8-flash` (update if Google retires it), `LLM_MODEL_FALLBACKS=gemini-3.8-flash,gemini-3.6-flash,gemini-3.5-flash-lite`, `LLM_TIMEOUT=25`, `LLM_TOTAL_TIMEOUT=75`, `PREP_RETRIES=2`, `PREP_MAX_TOKENS=8192`, `WHISPER_MODEL=small`, `WHISPER_LANG=` (auto-detect), `WHISPER_API_ENABLED=false`, `MAX_UPLOAD_MB=50`, `RATE_LIMIT_PER_MINUTE=20`, `MAX_CONCURRENT_ANALYSES=2`, `TRUSTED_PROXY_IPS=` (set only if you know your proxy IPs), `CORS_ORIGINS=`, `RETENTION_HOURS=168`, `RETENTION_INTERVAL_HOURS=6`, `PDF_TTL_HOURS=48`, `PDF_FONT_PATH=`, `PORT` (Render injects it).
