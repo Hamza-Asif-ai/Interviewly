@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from typing import Any, Dict
 
 logger = logging.getLogger(__name__)
@@ -29,12 +30,16 @@ def analyze_audio(audio_path: str, word_count: int = 0) -> Dict[str, Any]:
     if not os.path.exists(audio_path):
         raise FileNotFoundError(f"Audio file not found: {audio_path}")
 
+    started = time.time()
+    logger.info("Starting audio analysis (librosa)...")
+
     import librosa
     import numpy as np
 
     y, sr = librosa.load(audio_path, sr=16000, mono=True)
     duration = librosa.get_duration(y=y, sr=sr)
     if duration < 0.01:
+        logger.info("Audio analysis finished in %.2fs", time.time() - started)
         return {
             "speaking_rate_wpm": 0.0,
             "words_per_minute": 0.0,
@@ -133,6 +138,7 @@ def analyze_audio(audio_path: str, word_count: int = 0) -> Dict[str, Any]:
         clarity -= 0.5
     clarity = round(max(0.0, min(10.0, clarity)), 2)
 
+    logger.info("Audio analysis finished in %.2fs", time.time() - started)
     return {
         "speaking_rate_wpm": max(0, wpm),
         "words_per_minute": max(0.0, overall_wpm),

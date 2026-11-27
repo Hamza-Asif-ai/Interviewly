@@ -8,7 +8,13 @@ import os
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
+from .timing import StepTimeoutError, step_budget
+
 logger = logging.getLogger(__name__)
+
+MAX_SAMPLE_FPS = 1.0
+MAX_FRAME_WIDTH = 320
+MAX_FRAME_HEIGHT = 240
 
 # MediaPipe face-mesh landmark indices used for head-pose estimation.
 # Sides are the subject's: in an unmirrored image the subject's right eye
@@ -45,6 +51,18 @@ def _is_eye_contact(yaw: float, pitch: float) -> bool:
         abs(yaw) <= EYE_CONTACT_YAW_CONE
         and abs(pitch) <= EYE_CONTACT_PITCH_CONE
     )
+
+
+def _resize_for_mediapipe(frame: Any) -> Any:
+    """Shrink a frame to at most 320x240, preserving its aspect ratio."""
+    import cv2
+
+    height, width = frame.shape[:2]
+    scale = min(MAX_FRAME_WIDTH / width, MAX_FRAME_HEIGHT / height)
+    if scale >= 1.0:
+        return frame
+    size = (max(1, int(width * scale)), max(1, int(height * scale)))
+    return cv2.resize(frame, size, interpolation=cv2.INTER_AREA)
 
 
 def _pose_from_face_landmarks(
@@ -122,7 +140,16 @@ def analyze_video(video_path: str) -> Dict[str, Any]:
     if not os.path.exists(video_path):
         raise FileNotFoundError(f"Video file not found: {video_path}")
 
-    start = time.perf_counter()
+    start = time.time()
+    budget = step_budget()
+    deadline = start + budget
+    logger.info(
+        "Starting MediaPipe video analysis (max %.0f fps, max %dx%d, hard timeout %.1fs)...",
+        MAX_SAMPLE_FPS,
+        MAX_FRAME_WIDTH,
+        MAX_FRAME_HEIGHT,
+        budget,
+    )
 
     try:
         import cv2
@@ -131,6 +158,7 @@ def analyze_video(video_path: str) -> Dict[str, Any]:
         mp_holistic = mp.solutions.holistic
     except ImportError as exc:
         logger.warning("OpenCV/MediaPipe unavailable (%s); skipping visual analysis.", exc)
+        logger.info("MediaPipe analysis finished in %.2fs", time.time() - start)
         return {
             "face_detection_percent": 0.0,
             "eye_contact_percent": 0.0,
@@ -176,6 +204,7 @@ def analyze_video(video_path: str) -> Dict[str, Any]:
             "MediaPipe Holistic init failed (%s); skipping visual analysis.", exc
         )
         capture.release()
+        logger.info("MediaPipe analysis finished in %.2fs", time.time() - start)
         return {
             "face_detection_percent": 0.0,
             "eye_contact_percent": 0.0,
@@ -187,26 +216,46 @@ def analyze_video(video_path: str) -> Dict[str, Any]:
         }
 
     try:
+        frame_step = max(1, int(round(fps / MAX_SAMPLE_FPS)))
         index = 0
-        next_sample_at = 0.0
-        while True:
+        samples = 0
+        use_seek = True
+        while frame_count <= 0 or index < frame_count:
+            if time.time() >= deadline:
+                raise StepTimeoutError(
+                    f"MediaPipe video analysis exceeded the {budget:.0f}s hard timeout."
+                )
+            target = samples * frame_step
+            if frame_count > 0 and target >= frame_count:
+                break
+            if use_seek:
+                try:
+                    seek_ok = bool(capture.set(cv2.CAP_PROP_POS_FRAMES, target))
+                except Exception:  # pragma: no cover - backend may reject seeks
+                    seek_ok = False
+                if not seek_ok:
+                    logger.info("Frame seeking unavailable; sampling sequentially.")
+                    use_seek = False
+                    capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    index = 0
+                    continue
             ok, frame = capture.read()
             if not ok:
                 break
-            timestamp_ms = float(capture.get(cv2.CAP_PROP_POS_MSEC))
-            timestamp = (
-                timestamp_ms / 1000.0
-                if math.isfinite(timestamp_ms) and timestamp_ms >= 0
-                else index / fps
-            )
-            if timestamp + 1e-6 < next_sample_at:
+            if use_seek:
+                index = target + 1
+            elif index % frame_step:
                 index += 1
                 continue
-            next_sample_at = timestamp + 1.0
+            else:
+                index += 1
 
-            height, width, _ = frame.shape
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            small = _resize_for_mediapipe(frame)
+            height, width = small.shape[:2]
+            rgb = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
+            rgb.flags.writeable = False
             results = holistic.process(rgb)
+            samples += 1
             frames_analyzed += 1
 
             face_landmarks = results.face_landmarks
@@ -223,7 +272,6 @@ def analyze_video(video_path: str) -> Dict[str, Any]:
                 tilt = _shoulder_tilt_degrees(pose_landmarks)
                 if tilt is not None:
                     shoulder_tilts.append(tilt)
-            index += 1
     finally:
         holistic.close()
         capture.release()
@@ -254,7 +302,7 @@ def analyze_video(video_path: str) -> Dict[str, Any]:
         face_detection_percent,
         eye_contact_percent,
     )
-    logger.info("MediaPipe analysis took %.2fs", time.perf_counter() - start)
+    logger.info("MediaPipe analysis finished in %.2fs", time.time() - start)
     return {
         "face_detection_percent": face_detection_percent,
         "eye_contact_percent": eye_contact_percent,

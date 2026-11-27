@@ -20,7 +20,8 @@ openai==1.59.6
 sentence-transformers==3.3.1
 chromadb==0.5.23
 
-# Speech-to-text (openai-whisper is installed separately in Dockerfile)
+# Speech-to-text: faster-whisper (CTranslate2 int8); original openai-whisper is NOT used
+faster-whisper==1.1.0
 torch==2.5.1
 tiktoken==0.7.0
 

@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Dict, List, Optional
 
-from .llm import achat_completion, extract_faithful_json
+from .llm import extract_faithful_json, parallel_chat_completions
 from ..config import settings
 
 logger = logging.getLogger(__name__)
@@ -20,8 +21,18 @@ Return ONLY valid JSON with exactly these keys (no other text):
   "weaknesses": ["...", "..."],
   "improvement_tips": ["...", "..."]
 }}
-Use 3 of each. Tie every weakness to at least one concrete metric and give a specific,
-actionable improvement tip. Be kind but honest."""
+Use 3 of each. Tie every weakness to at least one concrete metric. Be kind but honest."""
+
+SCORE_TIPS_PROMPT = """You are an elite interview coach. A candidate practised an
+interview answer and the system measured these metrics:
+{metrics}
+
+Return ONLY valid JSON with exactly this key (no other text):
+{{
+  "improvement_tips": ["...", "...", "..."]
+}}
+Give exactly 3 specific, actionable improvement tips, each tied to a concrete metric
+above. Be kind but honest."""
 
 
 MIN_FACE_FRAMES = 5
@@ -192,19 +203,28 @@ async def analyze_report_with_llm(scorecard: Dict[str, Any]) -> Dict[str, str]:
         return {**_fallback_review(scorecard), "scoring_mode": "heuristic"}
 
     try:
-        content = await achat_completion(
-            [
-                {"role": "system", "content": "You return only valid JSON."},
-                {"role": "user", "content": SCORE_REVIEW_PROMPT.format(metrics=metrics_text)},
-            ],
-            temperature=0.3,
+        review_messages = [
+            {"role": "system", "content": "You return only valid JSON."},
+            {"role": "user", "content": SCORE_REVIEW_PROMPT.format(metrics=metrics_text)},
+        ]
+        tips_messages = [
+            {"role": "system", "content": "You return only valid JSON."},
+            {"role": "user", "content": SCORE_TIPS_PROMPT.format(metrics=metrics_text)},
+        ]
+        contents = await parallel_chat_completions(
+            [review_messages, tips_messages], temperature=0.3
         )
-        data = await extract_faithful_json(content)
+        data, tips_data = await asyncio.gather(
+            extract_faithful_json(contents[0]),
+            extract_faithful_json(contents[1]),
+        )
         fallback = _fallback_review(scorecard)
         return {
             "strengths": data.get("strengths") or fallback["strengths"],
             "weaknesses": data.get("weaknesses") or fallback["weaknesses"],
-            "improvement_tips": data.get("improvement_tips") or fallback["improvement_tips"],
+            "improvement_tips": (
+                tips_data.get("improvement_tips") or fallback["improvement_tips"]
+            ),
             "scoring_mode": "llm",
         }
     except Exception as exc:  # pragma: no cover

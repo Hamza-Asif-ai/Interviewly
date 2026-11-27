@@ -26,7 +26,12 @@ class Settings:
     """Application settings loaded from environment variables."""
 
     def __init__(self) -> None:
-        self.openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
+        # Gemini is reached through its OpenAI-compatible endpoint. Support both
+        # the generic key name and Gemini's own environment variable.
+        self.gemini_api_key: str = os.getenv("GEMINI_API_KEY", "")
+        self.openai_api_key: str = (
+            os.getenv("OPENAI_API_KEY", "").strip() or self.gemini_api_key.strip()
+        )
         self.openai_base_url: str = os.getenv(
             "OPENAI_BASE_URL",
             "https://generativelanguage.googleapis.com/v1beta/openai/",
@@ -39,8 +44,17 @@ class Settings:
         self.llm_model_fallbacks: List[str] = [
             m.strip() for m in fallback_raw.split(",") if m.strip()
         ]
-        self.llm_timeout: float = float(os.getenv("LLM_TIMEOUT", "25"))
-        self.llm_total_timeout: float = float(os.getenv("LLM_TOTAL_TIMEOUT", "75"))
+        # A single Gemini request is never allowed to exceed 30 seconds, and the
+        # whole fallback chain (plus every other pipeline step) is capped at 60.
+        self.llm_timeout: float = min(
+            float(os.getenv("LLM_TIMEOUT", "30")), 30.0
+        )
+        self.llm_total_timeout: float = min(
+            float(os.getenv("LLM_TOTAL_TIMEOUT", "60")), 60.0
+        )
+        self.pipeline_step_timeout: float = float(
+            os.getenv("PIPELINE_STEP_TIMEOUT", "60")
+        )
         self.prep_max_tokens: int = int(os.getenv("PREP_MAX_TOKENS", "8192"))
         self.prep_retries: int = int(os.getenv("PREP_RETRIES", "2"))
         self.prep_fallback_path: str = os.getenv(

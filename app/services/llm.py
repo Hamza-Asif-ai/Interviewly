@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Sequence
 
 from openai import AsyncOpenAI, OpenAI
 
 from ..config import settings
 
 logger = logging.getLogger(__name__)
+
+# Gemini requests must never be allowed to hang past this hard limit.
+GEMINI_REQUEST_TIMEOUT = 30.0
 
 _CACHED_CLIENT: OpenAI | None = None
 
@@ -57,6 +61,11 @@ def _remember_working_model(candidate: str, primary: str) -> None:
         )
 
 
+def _bounded_timeout(per_request_timeout: float, remaining: float) -> float:
+    """Cap every Gemini request at 30s and at the remaining total budget."""
+    return max(0.01, min(per_request_timeout, GEMINI_REQUEST_TIMEOUT, remaining))
+
+
 def get_client() -> OpenAI:
     """Return a cached synchronous OpenAI-compatible client."""
     global _CACHED_CLIENT
@@ -96,13 +105,25 @@ def chat_completion(
         if remaining <= 0:
             last_error = TimeoutError("LLM total timeout reached before a response.")
             break
+        request_timeout = _bounded_timeout(per_request_timeout, remaining)
+        call_started = time.time()
+        logger.info(
+            "Starting Gemini chat completion (model=%s, timeout=%.1fs)...",
+            candidate,
+            request_timeout,
+        )
         try:
             response = client.chat.completions.create(
                 model=candidate,
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
-                timeout=min(per_request_timeout, remaining),
+                timeout=request_timeout,
+            )
+            logger.info(
+                "Gemini chat completion finished in %.2fs (model=%s)",
+                time.time() - call_started,
+                candidate,
             )
             content = response.choices[0].message.content or ""
             if content:
@@ -113,6 +134,11 @@ def chat_completion(
             logger.warning("LLM model %r returned empty content; trying next.", candidate)
         except Exception as exc:  # noqa: BLE001 - try next fallback model
             last_error = exc
+            logger.info(
+                "Gemini chat completion attempt finished in %.2fs (model=%s)",
+                time.time() - call_started,
+                candidate,
+            )
             logger.warning("LLM chat completion with model %r failed: %s", candidate, exc)
     if last_empty is not None:
         return last_empty
@@ -145,32 +171,81 @@ async def achat_completion(
         total_timeout if total_timeout is not None else settings.llm_total_timeout
     )
     deadline = time.monotonic() + budget
-    for candidate in candidates:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            last_error = TimeoutError("LLM total timeout reached before a response.")
-            break
-        try:
-            response = await client.chat.completions.create(
-                model=candidate,
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                timeout=min(per_request_timeout, remaining),
+    try:
+        for candidate in candidates:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                last_error = TimeoutError("LLM total timeout reached before a response.")
+                break
+            request_timeout = _bounded_timeout(per_request_timeout, remaining)
+            call_started = time.time()
+            logger.info(
+                "Starting Gemini chat completion (model=%s, timeout=%.1fs)...",
+                candidate,
+                request_timeout,
             )
-            content = response.choices[0].message.content or ""
-            if content:
-                _remember_working_model(candidate, primary)
-                return content
-            if last_empty is None:
-                last_empty = content
-            logger.warning("LLM model %r returned empty content; trying next.", candidate)
-        except Exception as exc:  # noqa: BLE001 - try next fallback model
-            last_error = exc
-            logger.warning("LLM chat completion with model %r failed: %s", candidate, exc)
-    if last_empty is not None:
-        return last_empty
-    raise last_error  # type: ignore[misc]
+            try:
+                response = await client.chat.completions.create(
+                    model=candidate,
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    timeout=request_timeout,
+                )
+                logger.info(
+                    "Gemini chat completion finished in %.2fs (model=%s)",
+                    time.time() - call_started,
+                    candidate,
+                )
+                content = response.choices[0].message.content or ""
+                if content:
+                    _remember_working_model(candidate, primary)
+                    return content
+                if last_empty is None:
+                    last_empty = content
+                logger.warning(
+                    "LLM model %r returned empty content; trying next.", candidate
+                )
+            except Exception as exc:  # noqa: BLE001 - try next fallback model
+                last_error = exc
+                logger.info(
+                    "Gemini chat completion attempt finished in %.2fs (model=%s)",
+                    time.time() - call_started,
+                    candidate,
+                )
+                logger.warning(
+                    "LLM chat completion with model %r failed: %s", candidate, exc
+                )
+        if last_empty is not None:
+            return last_empty
+        raise last_error  # type: ignore[misc]
+    finally:
+        close = getattr(client, "close", None)
+        if close is not None:
+            try:
+                await close()
+            except Exception as exc:  # pragma: no cover - cleanup is best effort
+                logger.debug("Could not close Gemini client: %s", exc)
+
+
+async def parallel_chat_completions(
+    message_sets: Sequence[List[Dict[str, str]]],
+    **kwargs: Any,
+) -> List[str]:
+    """Run independent Gemini calls concurrently with asyncio.gather."""
+    if not message_sets:
+        return []
+    started = time.time()
+    logger.info("Starting %d parallel Gemini calls...", len(message_sets))
+    results = await asyncio.gather(
+        *(achat_completion(list(messages), **kwargs) for messages in message_sets)
+    )
+    logger.info(
+        "%d parallel Gemini calls finished in %.2fs",
+        len(message_sets),
+        time.time() - started,
+    )
+    return list(results)
 
 
 def parse_json_response(content: str) -> Any:

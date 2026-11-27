@@ -18,6 +18,7 @@ from .database import init_db
 from .limits import analysis_slots, client_ip, is_expensive_request
 from .retention import cleanup_all, retention_loop
 from .routers import practice, prep
+from .services.transcription import load_whisper_model
 from .ui.gradio_app import build_gradio_app, APP_TITLE
 
 logging.basicConfig(
@@ -34,6 +35,12 @@ async def lifespan(app: FastAPI):
     """Prepare the database and start periodic privacy cleanup."""
     logger.info("Initializing database at %s", settings.database_url)
     init_db()
+    logger.info("Gemini API key configured: %s", settings.has_llm())
+    logger.info("Pre-loading global Whisper model at server startup...")
+    try:
+        await asyncio.to_thread(load_whisper_model)
+    except Exception as exc:  # noqa: BLE001 - keep the API up if weights are unavailable
+        logger.error("Whisper model pre-load failed (%s); retrying on first use.", exc)
     await asyncio.to_thread(cleanup_all)
     task = asyncio.create_task(retention_loop())
     app.state.retention_task = task

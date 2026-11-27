@@ -1,4 +1,4 @@
-"""Speech-to-text: local Whisper with fallback to the OpenAI Whisper API."""
+"""Speech-to-text: local faster-whisper with fallback to the hosted Whisper API."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Dict
 
 from ..config import settings
+from .timing import StepTimeoutError, run_with_timeout, step_budget
 
 logger = logging.getLogger(__name__)
 
@@ -101,9 +102,12 @@ def probe_media(path: str) -> Dict[str, Any]:
     """Validate a media file with ffprobe before any expensive processing."""
     if not os.path.exists(path):
         return {"valid": False, "error": "File not found."}
+    started = time.time()
+    logger.info("Starting media probe...")
     executable = _get_ffprobe_exe()
     if not executable:
         logger.warning("ffprobe unavailable; skipping media validation.")
+        logger.info("Media probe finished in %.2fs", time.time() - started)
         return {"valid": True, "skipped": True, "has_video": True, "has_audio": True}
     try:
         result = subprocess.run(
@@ -117,6 +121,7 @@ def probe_media(path: str) -> Dict[str, Any]:
             timeout=60,
         )
         if result.returncode != 0:
+            logger.info("Media probe finished in %.2fs", time.time() - started)
             return {
                 "valid": False,
                 "error": "Invalid or corrupt media file: ffprobe could not read it.",
@@ -131,7 +136,7 @@ def probe_media(path: str) -> Dict[str, Any]:
             error = "File has no video stream."
         elif not has_audio:
             error = "Video has no audio track."
-        return {
+        probe_result = {
             "valid": error is None,
             "error": error,
             "has_video": has_video,
@@ -139,8 +144,11 @@ def probe_media(path: str) -> Dict[str, Any]:
             "duration": float(fmt.get("duration") or 0.0),
             "format_name": str(fmt.get("format_name") or ""),
         }
+        logger.info("Media probe finished in %.2fs", time.time() - started)
+        return probe_result
     except Exception as exc:
         logger.warning("ffprobe validation failed for %s: %s", path, exc)
+        logger.info("Media probe finished in %.2fs", time.time() - started)
         return {"valid": False, "error": f"Invalid or corrupt media file: {exc}"}
 
 
@@ -176,23 +184,49 @@ def extract_audio_from_video(video_path: str, target_wav: str) -> str:
         "1",
         target_wav,
     ]
-    result = subprocess.run(
-        command, capture_output=True, text=True, timeout=600
-    )
+    started = time.time()
+    budget = step_budget()
+    logger.info("Starting audio extraction (hard timeout %.1fs)...", budget)
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=budget,
+        )
+    except subprocess.TimeoutExpired as exc:
+        logger.error("Audio extraction exceeded %.1fs hard timeout.", budget)
+        raise StepTimeoutError("Audio extraction exceeded the hard timeout.") from exc
+    logger.info("Audio extraction finished in %.2fs", time.time() - started)
     if result.returncode != 0 or not os.path.exists(target_wav):
         logger.error("ffmpeg failed: %s", result.stderr[-2000:])
         raise RuntimeError("Failed to extract audio with ffmpeg.")
     return target_wav
 
 
-def _load_local_model():
-    """Load and cache the local Whisper model."""
+def _whisper_model_size() -> str:
+    """Only the tiny/base models fit the CPU budget of the free tier."""
+    configured = (settings.whisper_model or "base").strip().lower()
+    return "tiny" if configured == "tiny" else "base"
+
+
+def load_whisper_model():
+    """Load the int8 faster-whisper model once, normally at server startup."""
     global _WHISPER_MODEL
     if _WHISPER_MODEL is None:
-        import whisper
+        from faster_whisper import WhisperModel
 
-        _WHISPER_MODEL = whisper.load_model(settings.whisper_model)
+        size = _whisper_model_size()
+        started = time.time()
+        logger.info("Starting Whisper model load (%s, int8, CPU)...", size)
+        _WHISPER_MODEL = WhisperModel(size, device="cpu", compute_type="int8")
+        logger.info("Whisper model load finished in %.2fs", time.time() - started)
     return _WHISPER_MODEL
+
+
+def _load_local_model():
+    """Return the process-wide model (preloaded in the FastAPI lifespan)."""
+    return load_whisper_model()
 
 
 def _bundled_ffmpeg_name() -> str:
@@ -200,12 +234,7 @@ def _bundled_ffmpeg_name() -> str:
 
 
 def _ensure_ffmpeg_on_path() -> None:
-    """Make an ffmpeg executable name discoverable by subprocess consumers.
-
-    openai-whisper 20231117 invokes "ffmpeg" by literal name, so when the system
-    binary is missing we stage imageio-ffmpeg's bundled binary as `ffmpeg.exe`
-    in a local dir and prepend that dir to PATH.
-    """
+    """Stage the bundled ffmpeg binary for any subprocess-based audio consumer."""
     if shutil.which("ffmpeg"):
         return
     try:
@@ -228,20 +257,27 @@ def _ensure_ffmpeg_on_path() -> None:
 
 
 def _transcribe_local(audio_path: str, language: str | None = None) -> tuple[str, str]:
-    """Transcribe with local Whisper and return (text, detected language)."""
+    """Transcribe with faster-whisper and return (text, detected language)."""
     _ensure_ffmpeg_on_path()
     model = _load_local_model()
     lang = (language or settings.whisper_lang or "").strip()
     kwargs = {"language": lang} if lang else {}
-    result = model.transcribe(audio_path, **kwargs)
-    text = (result.get("text") or "").strip()
-    detected = (result.get("language") or lang or "").strip()
+    kwargs.update({"beam_size": 1, "condition_on_previous_text": False})
+    raw = model.transcribe(audio_path, **kwargs)
+    if isinstance(raw, tuple):
+        # faster-whisper returns (segment_iterator, transcription_info).
+        segments, info = raw[0], raw[1]
+        text = "".join(segment.text for segment in segments).strip()
+        detected = (getattr(info, "language", "") or lang or "").strip()
+    else:
+        text = (raw.get("text") or "").strip()
+        detected = (raw.get("language") or lang or "").strip()
     return text, detected
 
 
 def _transcribe_api(audio_path: str, language: str | None = None) -> str:
     """Transcribe using the OpenAI Whisper API."""
-    from .llm import get_client
+    from .llm import GEMINI_REQUEST_TIMEOUT, get_client
 
     client = get_client()
     lang = (language or settings.whisper_lang or "").strip()
@@ -250,6 +286,7 @@ def _transcribe_api(audio_path: str, language: str | None = None) -> str:
         response = client.audio.transcriptions.create(
             model="whisper-1",
             file=audio_file,
+            timeout=GEMINI_REQUEST_TIMEOUT,
             **kwargs,
         )
     return getattr(response, "text", "") or ""
@@ -277,10 +314,12 @@ def translate_to_english(text: str, source_lang: str = "") -> str:
         f"translation, nothing else. Text: {text}"
     )
     try:
-        translated = chat_completion(
+        translated = run_with_timeout(
+            chat_completion,
             [{"role": "user", "content": prompt}],
             temperature=0.0,
             max_tokens=settings.prep_max_tokens,
+            label=f"Gemini translation ({label})",
         )
         translated = (translated or "").strip()
         return translated or text
@@ -304,28 +343,43 @@ def transcribe_audio(
     if not os.path.exists(audio_path):
         raise FileNotFoundError(f"Audio file not found: {audio_path}")
 
-    start = time.perf_counter()
+    start = time.time()
+    logger.info("Starting Whisper transcription pipeline...")
     text = ""
     engine_worked = False
     detected_language = (language or settings.whisper_lang or "").strip()
     if not settings.whisper_api_enabled:
         try:
-            text, local_language = _transcribe_local(audio_path, language)
+            text, local_language = run_with_timeout(
+                _transcribe_local,
+                audio_path,
+                language,
+                label="Whisper transcription",
+            )
             engine_worked = True
             detected_language = detected_language or local_language
             if not text.strip():
                 logger.warning("Local Whisper returned an empty transcript.")
+        except StepTimeoutError:
+            raise
         except Exception as exc:
             logger.warning("Local Whisper failed (%s).", exc)
 
     if not text.strip() and settings.has_llm():
         try:
-            text = _transcribe_api(audio_path, language)
+            text = run_with_timeout(
+                _transcribe_api,
+                audio_path,
+                language,
+                label="Whisper API transcription",
+            )
             engine_worked = True
+        except StepTimeoutError:
+            raise
         except Exception as exc:
             logger.warning("Whisper API failed (%s).", exc)
 
-    logger.info("Whisper transcription took %.2fs", time.perf_counter() - start)
+    logger.info("Whisper transcription pipeline finished in %.2fs", time.time() - start)
     if not engine_worked:
         raise TranscriptionError(
             "Transcription unavailable: no Whisper model or API could transcribe the audio."

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import json
 import logging
 import os
 import secrets
+import time
 import uuid
 
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile
@@ -24,6 +26,7 @@ from ..services import (
     transcribe_audio,
     extract_audio_from_video,
 )
+from ..services.timing import StepTimeoutError, await_with_timeout
 from ..services.transcription import (
     NoSpeechError,
     TranscriptionError,
@@ -110,8 +113,12 @@ async def upload_practice_video(
         settings.upload_dir, f"{os.path.splitext(os.path.basename(video_path))[0]}.wav"
     )
 
+    started = time.time()
+    logger.info("Starting practice video analysis pipeline...")
     try:
-        probe = await run_in_threadpool(probe_media, video_path)
+        probe = await await_with_timeout(
+            run_in_threadpool(probe_media, video_path), label="Media probe"
+        )
         if not probe.get("valid"):
             raise HTTPException(
                 status_code=422,
@@ -130,11 +137,19 @@ async def upload_practice_video(
                     detail="File extension does not match its contents.",
                 )
 
-        await run_in_threadpool(extract_audio_from_video, video_path, audio_path)
-        duration = await _probe_duration(audio_path)
+        await await_with_timeout(
+            run_in_threadpool(extract_audio_from_video, video_path, audio_path),
+            label="Audio extraction",
+        )
+        duration = await await_with_timeout(
+            _probe_duration(audio_path), label="Audio duration probe"
+        )
 
         transcription = normalize_transcription(
-            await run_in_threadpool(transcribe_audio, audio_path, language)
+            await await_with_timeout(
+                run_in_threadpool(transcribe_audio, audio_path, language),
+                label="Whisper transcription",
+            )
         )
         transcript = transcription.original
         display_text = transcription.display_text
@@ -151,7 +166,9 @@ async def upload_practice_video(
             display_text, transcript, audio_path, video_path, duration, question_prompt
         )
         scorecard = build_scorecard(text_metrics, speech_metrics, visual_metrics)
-        review = await analyze_report_with_llm(scorecard)
+        review = await await_with_timeout(
+            analyze_report_with_llm(scorecard), label="Gemini scorecard review"
+        )
 
         access_token = secrets.token_urlsafe(24)
         report = AnalysisReport(
@@ -202,6 +219,10 @@ async def upload_practice_video(
             status_code=503,
             detail="Transcription unavailable. Upload a video with clear audio and retry.",
         ) from exc
+    except StepTimeoutError as exc:
+        logger.warning("Pipeline step timed out: %s", exc)
+        _cleanup([video_path, audio_path])
+        raise HTTPException(status_code=504, detail=str(exc)) from exc
     except Exception:
         logger.exception("Practice analysis failed.")
         _cleanup([video_path, audio_path])
@@ -211,6 +232,9 @@ async def upload_practice_video(
 
     # Privacy: local video/audio deleted immediately after processing.
     _cleanup([video_path, audio_path])
+    logger.info(
+        "Practice video analysis pipeline finished in %.2fs", time.time() - started
+    )
 
     result = json.loads(report.report_json)
     return {
@@ -225,10 +249,13 @@ async def upload_practice_video(
 
 
 async def _probe_duration(wav_path: str) -> float:
-    """Return audio duration in seconds using librosa."""
+    """Return audio duration in seconds without blocking the event loop."""
     import librosa
 
-    return float(librosa.get_duration(path=wav_path, sr=16000))
+    duration = await run_in_threadpool(
+        librosa.get_duration, path=wav_path, sr=16000
+    )
+    return float(duration)
 
 
 async def _run_analysis(
@@ -239,15 +266,24 @@ async def _run_analysis(
     duration: float,
     question_prompt: str,
 ):
-    """Run text, audio and video analysis concurrently."""
-    import asyncio
-
-    text_task = asyncio.create_task(
-        analyze_text(transcript, duration, question_prompt, scoring_text=scoring_text)
+    """Run text, audio and video analysis concurrently, each strictly bounded."""
+    text_task = await_with_timeout(
+        asyncio.create_task(
+            analyze_text(
+                transcript, duration, question_prompt, scoring_text=scoring_text
+            )
+        ),
+        label="Gemini text scoring",
     )
     word_count = len(transcript.split())
-    audio_task = run_in_threadpool(analyze_audio, audio_path, word_count)
-    video_task = run_in_threadpool(analyze_video, video_path)
+    audio_task = await_with_timeout(
+        run_in_threadpool(analyze_audio, audio_path, word_count),
+        label="Audio analysis",
+    )
+    video_task = await_with_timeout(
+        run_in_threadpool(analyze_video, video_path),
+        label="MediaPipe video analysis",
+    )
     text_metrics, speech_metrics, visual_metrics = await asyncio.gather(
         text_task, audio_task, video_task
     )
