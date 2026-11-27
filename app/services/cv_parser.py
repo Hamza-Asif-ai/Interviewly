@@ -51,7 +51,14 @@ def extract_text_from_docx(file_path: str) -> str:
         paragraphs = [p.text for p in document.paragraphs]
         for table in document.tables:
             for row in table.rows:
+                seen_cells: set[int] = set()
                 for cell in row.cells:
+                    # python-docx repeats the same underlying <w:tc> for every
+                    # column a merged cell spans; emit its text only once.
+                    identity = id(cell._tc)
+                    if identity in seen_cells:
+                        continue
+                    seen_cells.add(identity)
                     paragraphs.append(cell.text)
         return "\n".join(p for p in paragraphs if p.strip()).strip()
     except Exception as exc:

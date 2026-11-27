@@ -116,6 +116,8 @@ def analyze_video(video_path: str) -> Dict[str, Any]:
         posture_stability_score - 0-10 based on shoulder-tilt variance
         head_movement_score     - 0-10 based on head yaw variance
         frames_analyzed         - number of sampled frames
+        face_frames             - number of sampled frames with a detected face
+        analysis_available      - False when OpenCV/MediaPipe could not analyse
     """
     if not os.path.exists(video_path):
         raise FileNotFoundError(f"Video file not found: {video_path}")
@@ -135,6 +137,8 @@ def analyze_video(video_path: str) -> Dict[str, Any]:
             "posture_stability_score": 0.0,
             "head_movement_score": 0.0,
             "frames_analyzed": 0,
+            "face_frames": 0,
+            "analysis_available": False,
         }
 
     capture = cv2.VideoCapture(video_path)
@@ -178,6 +182,8 @@ def analyze_video(video_path: str) -> Dict[str, Any]:
             "posture_stability_score": 0.0,
             "head_movement_score": 0.0,
             "frames_analyzed": 0,
+            "face_frames": 0,
+            "analysis_available": False,
         }
 
     try:
@@ -255,4 +261,6 @@ def analyze_video(video_path: str) -> Dict[str, Any]:
         "posture_stability_score": posture_stability_score,
         "head_movement_score": head_movement_score,
         "frames_analyzed": frames_analyzed,
+        "face_frames": face_frames,
+        "analysis_available": True,
     }

@@ -40,7 +40,7 @@ def test_language_override_is_passed_to_whisper(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(transcription.settings, "whisper_lang", "")
     result = transcription.transcribe_audio(str(audio), language="ur")
     assert recorded["language"] == "ur"
-    assert result == "hello world"
+    assert result.original == "hello world"
 
 
 def test_detected_urdu_is_translated(monkeypatch, tmp_path) -> None:
@@ -58,7 +58,9 @@ def test_detected_urdu_is_translated(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(
         transcription, "translate_to_english", lambda text, lang="": "hello world"
     )
-    assert transcription.transcribe_audio(str(audio)) == "hello world"
+    result = transcription.transcribe_audio(str(audio))
+    assert result.original == "سلام دنیا"
+    assert result.translation == "hello world"
 
 
 def test_bundled_ffmpeg_is_staged_with_platform_name(monkeypatch, tmp_path) -> None:

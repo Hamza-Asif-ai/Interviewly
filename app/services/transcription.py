@@ -8,6 +8,7 @@ import os
 import shutil
 import subprocess
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict
 
@@ -17,7 +18,38 @@ logger = logging.getLogger(__name__)
 
 
 class TranscriptionError(RuntimeError):
-    """No usable transcription source was available for the audio file."""
+    """No transcription engine was available for the audio file."""
+
+
+class NoSpeechError(RuntimeError):
+    """A working transcription engine returned no recognisable speech."""
+
+
+@dataclass(frozen=True)
+class TranscriptionResult:
+    """Original transcript plus an optional faithful English translation."""
+
+    original: str
+    translation: str = ""
+    language: str = ""
+
+    @property
+    def display_text(self) -> str:
+        """Text shown to the user and used for content scoring."""
+        return self.translation or self.original
+
+
+def normalize_transcription(value: Any) -> TranscriptionResult:
+    """Accept either a TranscriptionResult or a plain original transcript."""
+    if isinstance(value, TranscriptionResult):
+        return value
+    if isinstance(value, str):
+        return TranscriptionResult(original=value)
+    return TranscriptionResult(
+        original=getattr(value, "original", "") or "",
+        translation=getattr(value, "translation", "") or "",
+        language=getattr(value, "language", "") or "",
+    )
 
 
 _WHISPER_MODEL = None
@@ -224,7 +256,7 @@ def _transcribe_api(audio_path: str, language: str | None = None) -> str:
 
 
 def translate_to_english(text: str, source_lang: str = "") -> str:
-    """Translate a non-English transcript into clean English for analysis."""
+    """Translate a non-English transcript faithfully, without rewriting metrics."""
     if not text or not text.strip():
         return text
     lang = (source_lang or "").strip()
@@ -238,11 +270,11 @@ def translate_to_english(text: str, source_lang: str = "") -> str:
 
     label = lang or "Urdu"
     prompt = (
-        f"The following text was transcribed from {label} speech by Whisper and "
-        "may contain misheard or garbled words. Using context, understand what "
-        "the speaker actually meant and translate it into clean, natural, "
-        "grammatically correct English. Return ONLY the English translation, "
-        f"nothing else. Text: {text}"
+        f"The following text was transcribed from {label} speech by Whisper. "
+        "Translate it faithfully into English. Preserve the speaker's meaning, "
+        "word count, numbers, hesitations and filler words. Do NOT clean up, "
+        "summarise, paraphrase, add or remove content. Return ONLY the English "
+        f"translation, nothing else. Text: {text}"
     )
     try:
         translated = chat_completion(
@@ -261,40 +293,61 @@ def urdu_to_english(text: str) -> str:
     return translate_to_english(text, "ur")
 
 
-def transcribe_audio(audio_path: str, language: str | None = None) -> str:
-    """Transcribe audio, translate non-English output, and return English text."""
+def transcribe_audio(
+    audio_path: str, language: str | None = None
+) -> TranscriptionResult:
+    """Transcribe audio and return the original plus a faithful translation.
+
+    Metrics are always computed on ``original`` by callers; ``display_text``
+    exists only for content scoring and presentation.
+    """
     if not os.path.exists(audio_path):
         raise FileNotFoundError(f"Audio file not found: {audio_path}")
 
     start = time.perf_counter()
     text = ""
+    engine_worked = False
     detected_language = (language or settings.whisper_lang or "").strip()
     if not settings.whisper_api_enabled:
         try:
             text, local_language = _transcribe_local(audio_path, language)
+            engine_worked = True
             detected_language = detected_language or local_language
-            if not text:
-                logger.warning("Local Whisper returned empty transcript.")
+            if not text.strip():
+                logger.warning("Local Whisper returned an empty transcript.")
         except Exception as exc:
             logger.warning("Local Whisper failed (%s).", exc)
 
-    if not text and settings.has_llm():
+    if not text.strip() and settings.has_llm():
         try:
             text = _transcribe_api(audio_path, language)
+            engine_worked = True
         except Exception as exc:
             logger.warning("Whisper API failed (%s).", exc)
 
-    if not text:
-        logger.warning("No working transcription source for %s.", audio_path)
-        logger.info("Whisper transcription took %.2fs", time.perf_counter() - start)
+    logger.info("Whisper transcription took %.2fs", time.perf_counter() - start)
+    if not engine_worked:
         raise TranscriptionError(
             "Transcription unavailable: no Whisper model or API could transcribe the audio."
         )
+    text = text.strip()
+    if not text:
+        raise NoSpeechError(
+            "No speech detected: the working transcription engine returned an "
+            "empty transcript. Check that the audio is not silent."
+        )
 
+    translation = ""
     has_urdu_script = any("\u0600" <= ch <= "\u06ff" for ch in text)
+    source = ""
     if detected_language and not detected_language.lower().startswith("en"):
-        text = translate_to_english(text, detected_language)
+        source = detected_language
     elif has_urdu_script:
-        text = translate_to_english(text, "ur")
-    logger.info("Whisper transcription took %.2fs", time.perf_counter() - start)
-    return text
+        source = "ur"
+    if source:
+        candidate = translate_to_english(text, source)
+        if candidate.strip() and candidate.strip() != text:
+            translation = candidate.strip()
+    return TranscriptionResult(
+        original=text, translation=translation, language=detected_language
+    )

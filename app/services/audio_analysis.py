@@ -20,7 +20,7 @@ def analyze_audio(audio_path: str, word_count: int = 0) -> Dict[str, Any]:
 
     Returns:
         speaking_rate_wpm: Transcribed words per minute over voiced speaking time.
-        pause_ratio: Fraction of total duration spent in silence (>0.3s).
+        pause_ratio: Fraction of total duration spent in deliberate pauses (>0.3s).
         pitch_mean_hz: Mean fundamental frequency of voiced segments.
         pitch_std_hz: Standard deviation of fundamental frequency.
         energy_variance: Variance of frame-level RMS energy.
@@ -67,20 +67,24 @@ def analyze_audio(audio_path: str, word_count: int = 0) -> Dict[str, Any]:
             run = 0
     if run:
         voiced_seconds += run * frame_duration
-    pause_duration = max(duration - voiced_seconds, 0.0)
-
-    # Only count silence long enough to be a deliberate pause (>0.3s).
+    # Only silence long enough to be a deliberate pause (>0.3s) contributes to
+    # the pause count and the pause ratio; micro-gaps are part of normal speech.
     pause_count = 0
+    pause_seconds = 0.0
     silent_run = 0
     for is_voiced in voiced_mask:
         if is_voiced:
-            if silent_run * frame_duration > PAUSE_THRESHOLD_S:
+            run_seconds = silent_run * frame_duration
+            if run_seconds > PAUSE_THRESHOLD_S:
                 pause_count += 1
+                pause_seconds += run_seconds
             silent_run = 0
         else:
             silent_run += 1
-    if silent_run * frame_duration > PAUSE_THRESHOLD_S:
+    trailing_seconds = silent_run * frame_duration
+    if trailing_seconds > PAUSE_THRESHOLD_S:
         pause_count += 1
+        pause_seconds += trailing_seconds
 
     # Real speaking rate: transcribed words over voiced (speaking) time, plus
     # the overall transcript WPM over the full clip duration.
@@ -102,8 +106,8 @@ def analyze_audio(audio_path: str, word_count: int = 0) -> Dict[str, Any]:
     # Energy variance
     energy_var = float(np.var(rms))
 
-    # Pause ratio
-    pause_ratio = round(pause_duration / max(duration, 0.01), 3)
+    # Pause ratio from qualifying pauses only
+    pause_ratio = round(pause_seconds / max(duration, 0.01), 3)
 
     # Clarity score heuristic (0-10)
     # Good: 120-180 wpm, 0.2-0.35 pause ratio, moderate pitch variation

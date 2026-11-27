@@ -12,12 +12,10 @@ import warnings
 from functools import lru_cache
 from typing import Any, Dict, List
 
-from pydantic import ValidationError
 from sentence_transformers import SentenceTransformer
 import chromadb
 
 from ..config import settings
-from ..schemas import GeneratedPrepGuide
 from .llm import achat_completion, extract_faithful_json
 
 warnings.filterwarnings("ignore")
@@ -242,6 +240,23 @@ def _salvage_json(content: str) -> Dict[str, Any]:
     return parsed
 
 
+_PLACEHOLDER_PATTERNS = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"\bunable to generate\b",
+        r"\bplease provide\b",
+        r"\bno job description\b",
+        r"\bno candidate cv\b",
+        r"\bno company\b",
+        r"\bnone provided\b",
+        r"\bacme analytics\b",
+        r"\blorem ipsum\b",
+        r"\bi can't (?:answer|provide|generate|complete)\b",
+        r"\btbd\b",
+    )
+)
+
+
 def validate_guide(guide: Any) -> Dict[str, Any]:
     """Ensure a parsed guide contains real, non-empty, non-placeholder content."""
     if not isinstance(guide, dict):
@@ -257,24 +272,13 @@ def validate_guide(guide: Any) -> Dict[str, Any]:
     if missing:
         raise ValueError(f"Guide is missing required keys: {missing}")
 
-    placeholder_markers = (
-        "unable to generate",
-        "please provide",
-        "i can't",
-        "no job description",
-        "no candidate cv",
-        "no company",
-        "none provided",
-        "acme analytics",
-        "lorem ipsum",
-        "tbd",
-    )
-
     def _real(text: Any) -> bool:
         if not isinstance(text, str):
             return False
         low = text.strip().lower()
-        return bool(low) and not any(m in low for m in placeholder_markers)
+        return bool(low) and not any(
+            pattern.search(low) for pattern in _PLACEHOLDER_PATTERNS
+        )
 
     for key in ("technical_questions", "behavioral_questions"):
         items = guide.get(key, [])
@@ -296,18 +300,25 @@ def validate_guide(guide: Any) -> Dict[str, Any]:
         if not all(_real(item) for item in items) or not items:
             raise ValueError(f"Guide section '{key}' is empty or contains placeholders.")
 
-    try:
-        validated = GeneratedPrepGuide.model_validate(guide)
-    except ValidationError as exc:
+    counts = {
+        name: len(guide.get(name, []))
+        for name in ("technical_questions", "behavioral_questions",
+                     "positioning_tips", "skill_gaps")
+    }
+    if counts["technical_questions"] != 5 or counts["behavioral_questions"] != 3:
         raise ValueError(
-            "Guide must contain exactly 5 technical questions, 3 behavioral "
-            "questions, 5 positioning tips and 5 skill gaps (got "
-            f"{len(guide.get('technical_questions', []))} technical, "
-            f"{len(guide.get('behavioral_questions', []))} behavioral, "
-            f"{len(guide.get('positioning_tips', []))} tips, "
-            f"{len(guide.get('skill_gaps', []))} gaps)."
-        ) from exc
-    return validated.model_dump()
+            "Guide must contain exactly 5 technical questions and 3 behavioral "
+            f"questions (got {counts['technical_questions']} technical, "
+            f"{counts['behavioral_questions']} behavioral)."
+        )
+    # A single extra or missing tip/gap is a formatting quirk, not a reason to
+    # discard an otherwise grounded guide.
+    if not 4 <= counts["positioning_tips"] <= 6 or not 4 <= counts["skill_gaps"] <= 6:
+        raise ValueError(
+            "Guide must contain about 5 positioning tips and 5 skill gaps "
+            f"(got {counts['positioning_tips']} tips, {counts['skill_gaps']} gaps)."
+        )
+    return dict(guide)
 
 
 @lru_cache(maxsize=1)
@@ -418,7 +429,10 @@ class PrepEngine:
                 self._retrieve_all, "candidate experience and skills", source="cv"
             ),
             asyncio.to_thread(
-                self._retrieve_all, "job requirements and qualifications", source="jd"
+                self._retrieve_all,
+                "job requirements and qualifications",
+                source="jd",
+                bounded=False,
             ),
             asyncio.to_thread(
                 self._retrieve_all, "company values and mission", source="company"
@@ -537,30 +551,46 @@ class PrepEngine:
             settings.prep_retries,
             last_error,
         )
+        logger.debug("Final prep generation error: %s", last_error)
         raise PrepGuideError(
-            f"LLM unavailable after {settings.prep_retries} attempts: {last_error}. "
+            f"LLM unavailable after {settings.prep_retries} attempts. "
             "Retry later, or enable Fast Mode for a clearly labelled demo guide."
         )
 
-    def _retrieve_all(self, query: str, source: str) -> str:
-        """Fetch a bounded, source-scoped context window for prompt injection."""
+    def _retrieve_all(
+        self, query: str, source: str, bounded: bool = True
+    ) -> str:
+        """Rank source-scoped chunks by the query and format prompt context.
+
+        JD context is deliberately unbounded: silently truncating requirements
+        produces guides that miss explicit must-haves.
+        """
         collection = self._collection()
         try:
-            results = collection.get(
-                limit=settings.rag_max_chunks, where={"source": source}
+            embedder = get_embedder()
+            embedding = embedder.encode([query], convert_to_numpy=True).tolist()
+            results = collection.query(
+                query_embeddings=embedding,
+                n_results=settings.rag_max_chunks if bounded else 1000,
+                where={"source": source},
             )
         except Exception as exc:  # pragma: no cover
-            logger.warning("Collection get failed: %s", exc)
+            logger.warning("Collection query failed: %s", exc)
             return ""
         docs = results.get("documents") or []
         metas = results.get("metadatas") or []
+        flat_docs = docs[0] if docs and isinstance(docs[0], list) else docs
+        flat_metas = metas[0] if metas and isinstance(metas[0], list) else metas
         lines: List[str] = []
         used = 0
-        for doc, meta in zip(docs, metas):
+        for index, doc in enumerate(flat_docs):
+            meta = flat_metas[index] if index < len(flat_metas) else {}
             label = (meta or {}).get("source", source)
             line = f"[{label}] {doc}"
-            if used + len(line) > settings.rag_context_chars:
+            if bounded and used + len(line) > settings.rag_context_chars:
                 break
             lines.append(line)
             used += len(line) + 1
+        if not bounded and len(flat_docs) > len(lines):
+            logger.warning("Retrieved only %d of many JD chunks.", len(lines))
         return "\n".join(lines)

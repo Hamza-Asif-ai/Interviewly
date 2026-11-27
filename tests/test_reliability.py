@@ -87,7 +87,7 @@ def test_retrieval_runs_off_event_loop(monkeypatch) -> None:
     monkeypatch.setattr(prep_engine.asyncio, "to_thread", tracked_to_thread)
     monkeypatch.setattr(prep_engine.settings, "has_llm", lambda: False)
     engine = prep_engine.PrepEngine("test")
-    monkeypatch.setattr(engine, "_retrieve_all", lambda query, source: "")
+    monkeypatch.setattr(engine, "_retrieve_all", lambda query, source, bounded=True: "")
     with pytest.raises(prep_engine.PrepGuideError):
         asyncio.run(engine.generate())
     assert len(calls) >= 3

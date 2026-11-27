@@ -96,7 +96,9 @@ def test_generate_raises_without_llm(monkeypatch) -> None:
 
     monkeypatch.setattr(prep_engine.settings, "has_llm", lambda: False)
     engine = PrepEngine("test")
-    monkeypatch.setattr(engine, "_retrieve_all", lambda query, source: "")
+    monkeypatch.setattr(
+        engine, "_retrieve_all", lambda query, source, bounded=True: ""
+    )
     with pytest.raises(PrepGuideError):
         asyncio.run(engine.generate())
 

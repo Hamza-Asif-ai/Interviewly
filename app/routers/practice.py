@@ -24,7 +24,12 @@ from ..services import (
     transcribe_audio,
     extract_audio_from_video,
 )
-from ..services.transcription import TranscriptionError, probe_media
+from ..services.transcription import (
+    NoSpeechError,
+    TranscriptionError,
+    normalize_transcription,
+    probe_media,
+)
 from starlette.concurrency import run_in_threadpool
 
 logger = logging.getLogger(__name__)
@@ -128,7 +133,11 @@ async def upload_practice_video(
         await run_in_threadpool(extract_audio_from_video, video_path, audio_path)
         duration = await _probe_duration(audio_path)
 
-        transcript = await run_in_threadpool(transcribe_audio, audio_path, language)
+        transcription = normalize_transcription(
+            await run_in_threadpool(transcribe_audio, audio_path, language)
+        )
+        transcript = transcription.original
+        display_text = transcription.display_text
         if len(transcript.split()) < MIN_TRANSCRIPT_WORDS:
             raise HTTPException(
                 status_code=422,
@@ -139,7 +148,7 @@ async def upload_practice_video(
             )
 
         text_metrics, speech_metrics, visual_metrics = await _run_analysis(
-            transcript, audio_path, video_path, duration, question_prompt
+            display_text, transcript, audio_path, video_path, duration, question_prompt
         )
         scorecard = build_scorecard(text_metrics, speech_metrics, visual_metrics)
         review = await analyze_report_with_llm(scorecard)
@@ -148,7 +157,9 @@ async def upload_practice_video(
         report = AnalysisReport(
             video_id=0,
             transcript=transcript,
-            report_json=json.dumps({**scorecard, **review}),
+            report_json=json.dumps(
+                {**scorecard, **review, "transcript_display": display_text}
+            ),
             access_token=access_token,
         )
 
@@ -177,6 +188,13 @@ async def upload_practice_video(
     except HTTPException:
         _cleanup([video_path, audio_path])
         raise
+    except NoSpeechError as exc:
+        logger.warning("No speech detected: %s", exc)
+        _cleanup([video_path, audio_path])
+        raise HTTPException(
+            status_code=422,
+            detail="No speech detected. Record again with clear audio and retry.",
+        ) from exc
     except TranscriptionError as exc:
         logger.warning("Transcription unavailable: %s", exc)
         _cleanup([video_path, audio_path])
@@ -200,6 +218,7 @@ async def upload_practice_video(
         "video_id": video.id,
         "duration_seconds": video.duration_seconds,
         "transcript": transcript,
+        "transcript_display": display_text,
         "scorecard": result,
         "access_token": access_token,
     }
@@ -213,6 +232,7 @@ async def _probe_duration(wav_path: str) -> float:
 
 
 async def _run_analysis(
+    scoring_text: str,
     transcript: str,
     audio_path: str,
     video_path: str,
@@ -222,7 +242,9 @@ async def _run_analysis(
     """Run text, audio and video analysis concurrently."""
     import asyncio
 
-    text_task = asyncio.create_task(analyze_text(transcript, duration, question_prompt))
+    text_task = asyncio.create_task(
+        analyze_text(transcript, duration, question_prompt, scoring_text=scoring_text)
+    )
     word_count = len(transcript.split())
     audio_task = run_in_threadpool(analyze_audio, audio_path, word_count)
     video_task = run_in_threadpool(analyze_video, video_path)
@@ -253,6 +275,7 @@ def get_practice_report(
         "video_id": video.id,
         "duration_seconds": video.duration_seconds,
         "transcript": report.transcript,
+        "transcript_display": data.get("transcript_display", report.transcript),
         "question_prompt": video.question_prompt,
         "created_at": str(report.created_at.isoformat()) if report.created_at else None,
         "scorecard": data,

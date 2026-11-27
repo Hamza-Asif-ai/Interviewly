@@ -15,6 +15,8 @@ from bidi.algorithm import get_display
 from fpdf import FPDF
 from fpdf.enums import XPos, YPos
 
+from ..config import settings
+
 logger = logging.getLogger(__name__)
 
 _FONT_FAMILY = "helvetica"
@@ -167,7 +169,7 @@ def build_prep_guide_pdf(
     guide: Dict[str, Any], output_dir: str, demo: bool = False
 ) -> str:
     """Render a prep guide dict into a PDF file and return its absolute path."""
-    cleanup_old_pdfs(output_dir)
+    cleanup_old_pdfs(output_dir, ttl_hours=settings.pdf_ttl_hours)
     _register_unicode_font()
     pdf = _PrepGuidePDF(format="A4")
     pdf.set_auto_page_break(auto=True, margin=15)

@@ -46,13 +46,22 @@ def test_retrieval_context_is_budgeted(monkeypatch) -> None:
     docs = [f"chunk {i} " + "x" * 200 for i in range(50)]
 
     class FakeCollection:
-        def get(self, **kwargs):
+        def query(self, **kwargs):
             return {
-                "documents": docs,
-                "metadatas": [{"source": "cv"} for _ in docs],
+                "documents": [docs],
+                "metadatas": [[{"source": "cv"} for _ in docs]],
             }
 
     monkeypatch.setattr(engine, "_collection", lambda: FakeCollection())
+    monkeypatch.setattr(
+        prep_engine,
+        "get_embedder",
+        lambda: SimpleNamespace(
+            encode=lambda texts, **kwargs: SimpleNamespace(
+                tolist=lambda: [[0.1, 0.2] for _ in texts]
+            )
+        ),
+    )
     monkeypatch.setattr(config.settings, "rag_context_chars", 500)
     monkeypatch.setattr(config.settings, "rag_max_chunks", 50)
     context = engine._retrieve_all("query", source="cv")

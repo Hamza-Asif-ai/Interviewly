@@ -98,7 +98,13 @@ def build_scorecard(
         _number(visual_metrics.get("eye_contact_percent")),
         _number(visual_metrics.get("posture_stability_score")),
         _number(visual_metrics.get("head_movement_score")),
-        int(_number(visual_metrics.get("frames_analyzed"))),
+        int(
+            _number(
+                visual_metrics.get(
+                    "face_frames", visual_metrics.get("frames_analyzed", 0)
+                )
+            )
+        ),
     )
 
     if visual_score is None:

@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import logging
 import os
-from functools import lru_cache
+import uuid
+from functools import lru_cache, wraps
 from typing import Any, Dict, List
 
 import gradio as gr
 
 from ..config import settings
 from ..database import SessionLocal
+from ..limits import analysis_slots
 from ..models import AnalysisReport, PracticeVideo, Session as DBSession
 from ..models import PrepGuide
 from ..services import (
@@ -26,6 +29,7 @@ from ..services import (
 )
 from ..services.cv_parser import CVParseError, extract_text_from_file
 from ..services.pdf_export import build_prep_guide_pdf
+from ..services.transcription import NoSpeechError, normalize_transcription
 from ..services.prep_engine import (
     PrepEngine,
     PrepGuideError,
@@ -36,15 +40,46 @@ from ..services.prep_engine import (
 logger = logging.getLogger(__name__)
 
 APP_TITLE = "Interviewly — AI Interview Buddy & Performance Analyzer"
-FOOTER = (
-    "**Privacy:** Your videos and CVs are processed locally on this server, analysed in "
-    "memory, and deleted immediately after processing. Nothing is stored long-term."
+MIN_TRANSCRIPT_WORDS = 3
+NO_SPEECH_MESSAGE = (
+    "No speech detected: the transcript had fewer than "
+    f"{MIN_TRANSCRIPT_WORDS} words. Record again with clear audio and retry."
 )
+FOOTER = (
+    "**Privacy:** CVs and videos are staged briefly on this server, and the uploaded "
+    "files are deleted as soon as processing finishes or fails. The transcript and "
+    "text you paste are sent to the configured LLM provider for scoring and guide "
+    "generation. Scorecards, transcripts and guides are retained in SQLite and PDFs "
+    "until the configured retention window expires."
+)
+
+
+def _delete_temp_file(path: str | None) -> None:
+    """Best-effort removal of a staged upload."""
+    try:
+        if path and os.path.exists(path):
+            os.remove(path)
+    except OSError as exc:  # pragma: no cover - cleanup must never raise
+        logger.warning("Could not remove temp file %s: %s", path, exc)
 
 
 def _run(coro) -> Any:
     """Run an async coroutine to completion from a sync Gradio handler."""
     return asyncio.run(coro)
+
+
+def _bounded_handler(fn):
+    """Apply the same non-blocking analysis cap used by the REST endpoints."""
+    @wraps(fn)
+    def wrapped(*args, **kwargs):
+        if not analysis_slots.try_acquire():
+            raise gr.Error("Server busy. Please retry shortly.")
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            analysis_slots.release()
+
+    return wrapped
 
 
 # --------------------------------------------------------------------------- #
@@ -127,6 +162,7 @@ def _guide_to_markdown(guide: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+@_bounded_handler
 def _generate_prep_handler(
     cv_file: str | None,
     job_description: str,
@@ -136,22 +172,22 @@ def _generate_prep_handler(
     """Generate a prep guide and return markdown output and a PDF download path."""
     import traceback
 
-    if fast_mode:
-        logger.info("Prep Engine: Fast Mode ON - serving cached fallback guide.")
-        guide = load_fallback_guide()
-        pdf_path = None
-        try:
-            pdf_path = build_prep_guide_pdf(guide, settings.pdf_dir, demo=True)
-        except Exception as exc:  # pragma: no cover - never fail the guide over PDF
-            logger.warning("PDF export failed in Fast Mode: %s", exc)
-        return _guide_to_markdown(guide), pdf_path
-
-    if cv_file is None or not os.path.exists(cv_file):
-        raise gr.Error("Please upload a CV file (PDF, DOCX or TXT).")
-    if not job_description.strip():
-        raise gr.Error("Please paste the target job description.")
-
     try:
+        if fast_mode:
+            logger.info("Prep Engine: Fast Mode ON - serving cached fallback guide.")
+            guide = load_fallback_guide()
+            pdf_path = None
+            try:
+                pdf_path = build_prep_guide_pdf(guide, settings.pdf_dir, demo=True)
+            except Exception as exc:  # pragma: no cover - never fail the guide over PDF
+                logger.warning("PDF export failed in Fast Mode: %s", exc)
+            return _guide_to_markdown(guide), pdf_path
+
+        if cv_file is None or not os.path.exists(cv_file):
+            raise gr.Error("Please upload a CV file (PDF, DOCX or TXT).")
+        if not job_description.strip():
+            raise gr.Error("Please paste the target job description.")
+
         try:
             cv_text = extract_text_from_file(cv_file)
         except CVParseError as exc:
@@ -170,49 +206,51 @@ def _generate_prep_handler(
                 f"Company overview exceeds {settings.max_input_chars} characters."
             )
 
+        engine_session_id = uuid.uuid4().hex
+        engine = PrepEngine(engine_session_id)
+        try:
+            engine.index_documents(cv_text, job_description, company_overview)
+            guide = _run(engine.generate())
+        finally:
+            engine.cleanup()
+
+        if not isinstance(guide, dict):
+            raise gr.Error("The model returned an unexpected guide shape.")
+
+        try:
+            validate_guide(guide)
+        except ValueError:
+            logger.error(
+                "LLM returned an unusable guide: %s", traceback.format_exc()
+            )
+            raise gr.Error(
+                "The model did not produce usable content. Please retry, or enable "
+                "Fast Mode for a clearly labelled demo."
+            ) from None
+
+        logger.info(
+            "Prep guide generated and validated: %d technical, %d behavioral, "
+            "%d tips, %d skill gaps.",
+            len(guide.get("technical_questions", [])),
+            len(guide.get("behavioral_questions", [])),
+            len(guide.get("positioning_tips", [])),
+            len(guide.get("skill_gaps", [])),
+        )
+
         db = SessionLocal()
         try:
             session = DBSession(title="Prep session")
             db.add(session)
             db.flush()
-
-            engine = PrepEngine(str(session.id))
-            try:
-                engine.index_documents(cv_text, job_description, company_overview)
-                guide = _run(engine.generate())
-            finally:
-                engine.cleanup()
-
-            if not isinstance(guide, dict):
-                raise gr.Error("The model returned an unexpected guide shape.")
-
-            try:
-                validate_guide(guide)
-            except ValueError as exc:
-                logger.error(
-                    "LLM returned an unusable guide: %s", traceback.format_exc()
+            db.add(
+                PrepGuide(
+                    session_id=session.id,
+                    cv_filename=os.path.basename(cv_file),
+                    job_description=job_description,
+                    company_overview=company_overview,
+                    guide_json=json.dumps(guide),
                 )
-                raise gr.Error(
-                    f"The model did not produce usable content: {exc}"
-                ) from exc
-
-            logger.info(
-                "Prep guide generated and validated: %d technical, %d behavioral, "
-                "%d tips, %d skill gaps.",
-                len(guide.get("technical_questions", [])),
-                len(guide.get("behavioral_questions", [])),
-                len(guide.get("positioning_tips", [])),
-                len(guide.get("skill_gaps", [])),
             )
-
-            row = PrepGuide(
-                session_id=session.id,
-                cv_filename=os.path.basename(cv_file),
-                job_description=job_description,
-                company_overview=company_overview,
-                guide_json=json.dumps(guide),
-            )
-            db.add(row)
             db.commit()
         finally:
             db.close()
@@ -224,25 +262,21 @@ def _generate_prep_handler(
             )
             logger.info("Prep guide PDF saved to: %s", pdf_path)
         except Exception as exc:  # pragma: no cover - never fail the guide over PDF
-            logger.warning(
-                "PDF export failed; continuing without download: %s", exc
-            )
+            logger.warning("PDF export failed; continuing without download: %s", exc)
         return _guide_to_markdown(guide), pdf_path
     except gr.Error:
         raise
-    except PrepGuideError as exc:
+    except PrepGuideError:
+        logger.warning("Prep generation unavailable: %s", traceback.format_exc())
         raise gr.Error(
-            f"{exc} Enable Fast Mode if you only want a clearly labelled demo."
-        ) from exc
-    except Exception as exc:  # pragma: no cover
+            "Prep guide generation is unavailable. Retry later, or enable Fast Mode "
+            "for a clearly labelled demo."
+        ) from None
+    except Exception:  # pragma: no cover
         logger.error("Prep generation failed: %s", traceback.format_exc())
-        raise gr.Error(f"Prep generation failed: {exc}") from exc
+        raise gr.Error("Prep generation failed. Please retry shortly.") from None
     finally:
-        if cv_file and os.path.exists(cv_file):
-            try:
-                os.remove(cv_file)
-            except OSError as exc:  # pragma: no cover
-                logger.warning("Could not remove uploaded CV: %s", exc)
+        _delete_temp_file(cv_file)
 
 
 # --------------------------------------------------------------------------- #
@@ -250,7 +284,7 @@ def _generate_prep_handler(
 # --------------------------------------------------------------------------- #
 def _metrics_table(scorecard: Dict[str, Any]) -> List[List[Any]]:
     """Flatten metrics into a rows table for display."""
-    rows: List[List[Any]] = [["Category", "Metric", "Value"]]
+    rows: List[List[Any]] = []
     groups: Dict[str, Dict[str, Any]] = {
         "Text": scorecard.get("text_metrics", {}),
         "Speech": scorecard.get("speech_metrics", {}),
@@ -321,13 +355,14 @@ def _render_practice(
     )
     alignment = "right" if direction == "rtl" else "left"
     transcript_md = (
-        f"## Transcript\n\n<div dir='{direction}' style='text-align:{alignment}'>> {transcript}</div>"
+        f"## Transcript\n\n<div dir='{direction}' style='text-align:{alignment}'>"
+        f"{html.escape(transcript)}</div>"
         if transcript.strip() else
         "## Transcript\n\n_No transcript detected — is audio present in the video?_"
     )
     if visual_score is None:
         transcript_md += (
-            "\n\n_Visual metrics unavailable: face detection was too low._"
+            "\n\n_Visual analysis unavailable: face detection had too little data._"
         )
 
     return (
@@ -341,6 +376,7 @@ def _render_practice(
     )
 
 
+@_bounded_handler
 def _analyze_practice_handler(
     video: str | None,
     question_prompt: str,
@@ -350,19 +386,19 @@ def _analyze_practice_handler(
     """Analyze a practice video end to end and return display outputs."""
     import traceback
 
-    if fast_mode:
-        logger.info("Practice Engine: Fast Mode ON - serving cached scorecard.")
-        data = _load_practice_fallback()
-        return _render_practice(
-            data["scorecard"], data["review"], data["transcript"], demo=True
-        )
-
-    if video is None or not os.path.exists(video):
-        raise gr.Error("Please upload or record a practice video.")
-
     video_path = ""
     audio_path = ""
     try:
+        if fast_mode:
+            logger.info("Practice Engine: Fast Mode ON - serving cached scorecard.")
+            data = _load_practice_fallback()
+            return _render_practice(
+                data["scorecard"], data["review"], data["transcript"], demo=True
+            )
+
+        if video is None or not os.path.exists(video):
+            raise gr.Error("Please upload or record a practice video.")
+
         video_path = video
         base = os.path.splitext(video)[0]
         audio_path = base + ".wav"
@@ -371,9 +407,21 @@ def _analyze_practice_handler(
         extract_audio_from_video(video_path, audio_path)
         duration = _probe_duration(audio_path)
         language_code = {"English": "en", "Urdu": "ur"}.get(language, "")
-        transcript = transcribe_audio(audio_path, language_code)
-        text_metrics = _run(analyze_text(transcript, duration, question_prompt))
-        speech_metrics = analyze_audio(audio_path, len(transcript.split()))
+        transcription = normalize_transcription(
+            transcribe_audio(audio_path, language_code)
+        )
+        transcript = transcription.original
+        if len(transcript.split()) < MIN_TRANSCRIPT_WORDS:
+            raise gr.Error(NO_SPEECH_MESSAGE)
+
+        word_count = len(transcript.split())
+        text_metrics = _run(
+            analyze_text(
+                transcript, duration, question_prompt,
+                scoring_text=transcription.display_text,
+            )
+        )
+        speech_metrics = analyze_audio(audio_path, word_count)
         visual_metrics = analyze_video(video_path)
         scorecard = build_scorecard(text_metrics, speech_metrics, visual_metrics)
         review = _run(analyze_report_with_llm(scorecard))
@@ -394,29 +442,36 @@ def _analyze_practice_handler(
             )
             db.add(video_row)
             db.flush()
-            report = AnalysisReport(
-                video_id=video_row.id,
-                transcript=transcript,
-                report_json=json.dumps({**scorecard, **review}),
+            db.add(
+                AnalysisReport(
+                    video_id=video_row.id,
+                    transcript=transcript,
+                    report_json=json.dumps(
+                        {
+                            **scorecard,
+                            **review,
+                            "transcript_display": transcription.display_text,
+                        }
+                    ),
+                )
             )
-            db.add(report)
             db.commit()
         finally:
             db.close()
 
-        return _render_practice(scorecard, review, transcript)
+        return _render_practice(
+            scorecard, review, transcription.display_text
+        )
     except gr.Error:
         raise
-    except Exception as exc:  # pragma: no cover
+    except NoSpeechError:
+        raise gr.Error(NO_SPEECH_MESSAGE) from None
+    except Exception:  # pragma: no cover
         logger.error("Practice analysis failed: %s", traceback.format_exc())
-        raise gr.Error("Analysis failed. Please retry with a clear video.") from exc
+        raise gr.Error("Analysis failed. Please retry with a clear video.") from None
     finally:
         for path_ in (audio_path, video_path, video):
-            try:
-                if path_ and os.path.exists(path_):
-                    os.remove(path_)
-            except OSError as exc:  # pragma: no cover
-                logger.warning("Could not delete temp file %s: %s", path_, exc)
+            _delete_temp_file(path_)
 
 
 def _probe_duration(wav_path: str) -> float:

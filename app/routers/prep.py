@@ -98,8 +98,8 @@ async def generate_prep_guide(
         raise HTTPException(
             status_code=503,
             detail=(
-                f"{exc} Enable Fast Mode for a demo guide that is explicitly "
-                "not based on your CV."
+                "LLM unavailable. Retry later, or enable Fast Mode for a demo "
+                "guide that is explicitly not based on your CV."
             ),
         ) from exc
     except Exception:

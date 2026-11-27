@@ -70,26 +70,41 @@ def _count_filler_words(text: str) -> Tuple[int, Dict[str, int]]:
     return sum(result.values()), result
 
 
+_STAGE_PATTERNS = {
+    "situation": re.compile(
+        r"\b(?:situation|context|background|challenge|project|team|company|role|"
+        r"when|at my previous|in my last)\b",
+        re.IGNORECASE,
+    ),
+    "task": re.compile(
+        r"\b(?:task|responsibility|responsibilities|goal|objective|asked|needed|"
+        r"required|had to|my role|charged with)\b",
+        re.IGNORECASE,
+    ),
+    "action": re.compile(
+        r"\b(?:i|we|my team)\s+(?:led|built|implemented|developed|created|"
+        r"organized|managed|initiated|proposed|designed|automated|delivered|"
+        r"wrote|owned|drove|shipped|rebuilt|coordinated)\b",
+        re.IGNORECASE,
+    ),
+    "result": re.compile(
+        r"\b(?:result|outcome|achieved|increased|reduced|improved|saved|"
+        r"delivered|grew|impact|percent)\b",
+        re.IGNORECASE,
+    ),
+}
+
+
 def _simple_star_check(text: str) -> float:
-    """Heuristic STAR structure check (0-10) based on semantic triggers."""
-    signals = {
-        "situation": ["project", "team", "company", "role", "context", "background",
-                       "when", "at my previous", "in my last", "challenge"],
-        "task": ["was", "responsibility", "goal", "objective", "asked", "needed",
-                 "task was", "my role"],
-        "action": ["i", "led", "implemented", "developed", "created", "built",
-                   "organized", "managed", "initiated", "proposed", "designed"],
-        "result": ["result", "outcome", "achieved", "increased", "reduced",
-                   "improved", "saved", "delivered", "grew", "revenue", "impact"],
-    }
-    lower = text.lower()
-    hits = 0
-    total = 0
-    for _stage, keywords in signals.items():
-        total += 1
-        if any(kw in lower for kw in keywords):
-            hits += 1
-    return round(10 * hits / max(total, 1), 1)
+    """Heuristic STAR structure check (0-10) requiring whole-word evidence.
+
+    Each stage needs a real signal: a bare pronoun, copula or substring such as
+    "i" in "pig" never counts as an action.
+    """
+    hits = sum(
+        1 for pattern in _STAGE_PATTERNS.values() if pattern.search(text or "")
+    )
+    return round(10 * hits / len(_STAGE_PATTERNS), 1)
 
 
 async def _llm_scores(
@@ -156,12 +171,13 @@ async def analyze_text(
     transcript: str,
     duration_seconds: float,
     question_prompt: str | None = None,
+    scoring_text: str | None = None,
 ) -> Dict[str, Any]:
-    """Analyse a practice interview transcript and return structured metrics.
+    """Analyse an interview transcript and return structured metrics.
 
-    Returns a dict with keys: word_count, words_per_minute,
-    filler_word_count, filler_word_counts, filler_words_per_minute,
-    conciseness_score, star_score, relevance_score.
+    ``transcript`` is the original speech and drives word count, WPM and
+    filler counts. ``scoring_text`` (typically a faithful translation) is used
+    only for STAR/relevance/conciseness grading, never to clean up metrics.
     """
     words = transcript.split()
     word_count = len(words)
@@ -172,7 +188,7 @@ async def analyze_text(
     fpm = round(filler_total / minutes, 2)
 
     star_score, relevance_score, conciseness_score, scoring_mode = await _llm_scores(
-        transcript, question_prompt
+        scoring_text if scoring_text is not None else transcript, question_prompt
     )
 
     if conciseness_score is not None and 60 <= duration_seconds <= 120:

@@ -59,22 +59,31 @@ class Settings:
         self.rag_context_chars: int = int(os.getenv("RAG_CONTEXT_CHARS", "4000"))
         self.rag_max_chunks: int = int(os.getenv("RAG_MAX_CHUNKS", "8"))
         self.pdf_ttl_hours: int = int(os.getenv("PDF_TTL_HOURS", "48"))
+        self.retention_hours: int = int(os.getenv("RETENTION_HOURS", "168"))
+        self.retention_interval_hours: float = float(
+            os.getenv("RETENTION_INTERVAL_HOURS", "6")
+        )
         self.rate_limit_per_minute: int = int(os.getenv("RATE_LIMIT_PER_MINUTE", "20"))
         self.max_concurrent_analyses: int = int(
             os.getenv("MAX_CONCURRENT_ANALYSES", "2")
         )
+        self.trusted_proxy_ips: List[str] = [
+            ip.strip()
+            for ip in os.getenv("TRUSTED_PROXY_IPS", "").split(",")
+            if ip.strip()
+        ]
         self.cors_origins: List[str] = [
             origin.strip()
             for origin in os.getenv("CORS_ORIGINS", "").split(",")
             if origin.strip()
         ]
 
-        self.database_url: str = os.getenv(
-            "DATABASE_URL", f"sqlite:///{DB_PATH.as_posix()}"
+        self.database_url: str = (
+            os.getenv("DATABASE_URL") or f"sqlite:///{DB_PATH.as_posix()}"
         )
-        self.chroma_dir: str = os.getenv("CHROMA_DIR", CHROMA_DIR.as_posix())
-        self.upload_dir: str = os.getenv("UPLOAD_DIR", UPLOAD_DIR.as_posix())
-        self.pdf_dir: str = os.getenv("PDF_DIR", PDFS_DIR.as_posix())
+        self.chroma_dir: str = os.getenv("CHROMA_DIR") or CHROMA_DIR.as_posix()
+        self.upload_dir: str = os.getenv("UPLOAD_DIR") or UPLOAD_DIR.as_posix()
+        self.pdf_dir: str = os.getenv("PDF_DIR") or PDFS_DIR.as_posix()
 
         self.whisper_api_enabled: bool = (
             os.getenv("WHISPER_API_ENABLED", "false").lower() == "true"
