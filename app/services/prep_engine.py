@@ -284,16 +284,17 @@ def validate_guide(guide: Any) -> Dict[str, Any]:
         items = guide.get(key, [])
         if not items:
             raise ValueError(f"Guide section '{key}' is empty.")
-        real_count = 0
         for item in items:
-            if isinstance(item, dict) and _real(item.get("question")) and _real(item.get("answer")):
-                real_count += 1
-            elif isinstance(item, str) and _real(item):
-                real_count += 1
-        if real_count != len(items):
-            raise ValueError(
-                f"Guide section '{key}' contains placeholders or empty content."
-            )
+            if not isinstance(item, dict):
+                raise ValueError(
+                    f"Guide section '{key}' must contain question objects with "
+                    "non-empty 'question' and 'answer' fields."
+                )
+            if not _real(item.get("question")) or not _real(item.get("answer")):
+                raise ValueError(
+                    f"Guide section '{key}' contains a question object with a "
+                    "placeholder or empty question/answer."
+                )
 
     for key in ("positioning_tips", "skill_gaps"):
         items = guide.get(key, [])

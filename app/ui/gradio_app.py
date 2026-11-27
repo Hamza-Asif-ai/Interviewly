@@ -47,10 +47,11 @@ NO_SPEECH_MESSAGE = (
 )
 FOOTER = (
     "**Privacy:** CVs and videos are staged briefly on this server, and the uploaded "
-    "files are deleted as soon as processing finishes or fails. The transcript and "
-    "text you paste are sent to the configured LLM provider for scoring and guide "
-    "generation. Scorecards, transcripts and guides are retained in SQLite and PDFs "
-    "until the configured retention window expires."
+    "files are deleted as soon as processing finishes or fails. The text extracted "
+    "from your uploaded CV, the transcript and the text you paste are sent to the "
+    "configured LLM provider for scoring and guide generation. Scorecards, "
+    "transcripts and guides are retained in SQLite and PDFs until the configured "
+    "retention window expires."
 )
 
 

@@ -114,7 +114,7 @@ def cleanup_old_uploads(hours: int | None = None) -> int:
         return 0
     removed = 0
     for path in upload_dir.iterdir():
-        if not path.is_file():
+        if path.name == ".gitkeep" or not path.is_file():
             continue
         try:
             if path.stat().st_mtime < cutoff:

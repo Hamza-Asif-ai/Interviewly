@@ -14,7 +14,7 @@ from types import SimpleNamespace
 
 import gradio as gr
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -22,7 +22,7 @@ from sqlalchemy.pool import StaticPool
 
 sys.path.insert(0, ".")
 
-from app import config, main  # noqa: E402
+from app import config, limits, main, retention  # noqa: E402
 from app.database import Base, get_db  # noqa: E402
 from app.models import (  # noqa: E402
     AnalysisReport,
@@ -92,6 +92,10 @@ def _rate_limit_app():
 
     @test_app.post("/gradio_api/queue/join")
     def gradio_queue():
+        return {"ok": True}
+
+    @test_app.post("/gradio_api/call/_generate_prep_handler")
+    def gradio_call():
         return {"ok": True}
 
     return test_app
@@ -642,3 +646,168 @@ class TestItem12Documentation:
             "CORS_ORIGINS", "PDF_FONT_PATH",
         ):
             assert setting in readme, setting
+
+
+class TestRemainingReviewFindings:
+    def test_privacy_notice_includes_extracted_cv_text(self) -> None:
+        notices = (
+            gradio_app.FOOTER.lower(),
+            Path("README.md").read_text(encoding="utf-8").lower(),
+        )
+        for notice in notices:
+            assert "text extracted from" in notice
+            assert "uploaded cv" in notice
+            assert "llm provider" in notice
+
+    def test_bare_string_questions_are_rejected_and_retried_before_commit(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        from fastapi import FastAPI
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+        from sqlalchemy.pool import StaticPool
+
+        from app.database import Base, get_db
+        from app.services import prep_engine as engine_module
+
+        bad_guide = _valid_guide()
+        bad_guide["technical_questions"] = [f"Question {i}" for i in range(5)]
+        replies = [json.dumps(bad_guide), json.dumps(_valid_guide())]
+        events: list[str] = []
+
+        async def fake_completion(messages, **kwargs):
+            events.append("llm")
+            return replies.pop(0)
+
+        db_engine = create_engine(
+            "sqlite://",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        Base.metadata.create_all(db_engine)
+        testing_session = sessionmaker(bind=db_engine, autocommit=False, autoflush=False)
+
+        def override_get_db():
+            db = testing_session()
+            original_commit = db.commit
+
+            def tracked_commit():
+                events.append("commit")
+                return original_commit()
+
+            db.commit = tracked_commit
+            try:
+                yield db
+            finally:
+                db.close()
+
+        async def fake_save(file, extension):
+            path = tmp_path / f"cv{extension}"
+            path.write_bytes(b"CV")
+            return str(path)
+
+        def fake_index(self, cv_text, job_description, company_overview):
+            self.cv_text = cv_text
+
+        app = FastAPI()
+        app.include_router(prep_router.router)
+        app.dependency_overrides[get_db] = override_get_db
+        monkeypatch.setattr(prep_router, "_save_upload", fake_save)
+        monkeypatch.setattr(prep_router, "extract_text_from_file", lambda path: "CV text")
+        monkeypatch.setattr(prep_router.PrepEngine, "index_documents", fake_index)
+        monkeypatch.setattr(prep_router.PrepEngine, "cleanup", lambda self: None)
+        monkeypatch.setattr(prep_router.PrepEngine, "_retrieve_all", lambda *a, **k: "")
+        monkeypatch.setattr(engine_module.settings, "prep_retries", 2)
+        monkeypatch.setattr(engine_module.settings, "has_llm", lambda: True)
+        monkeypatch.setattr(engine_module, "achat_completion", fake_completion)
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/prep/generate",
+                files={"cv_file": ("cv.txt", b"CV", "text/plain")},
+                data={"job_description": "Backend engineer"},
+            )
+        assert response.status_code == 200
+        assert events == ["llm", "llm", "commit"]
+        assert all(
+            isinstance(item, dict)
+            for item in response.json()["guide"]["technical_questions"]
+        )
+        assert not replies
+
+    def test_question_objects_need_non_empty_question_and_answer(self) -> None:
+        for bad_item in (
+            "Just a question string",
+            {"question": "A real question"},
+            {"answer": "A real answer"},
+            {"question": "", "answer": "A real answer"},
+            {"question": "A real question", "answer": "  "},
+        ):
+            guide = _valid_guide()
+            guide["technical_questions"][0] = bad_item
+            with pytest.raises(ValueError, match="question object"):
+                prep_engine.validate_guide(guide)
+
+    def test_cleanup_old_uploads_keeps_gitkeep(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr(retention.settings, "upload_dir", str(tmp_path))
+        keep = tmp_path / ".gitkeep"
+        keep.touch()
+        stale = tmp_path / "stale-upload.txt"
+        stale.write_text("old")
+        old_time = time.time() - 7200
+        os.utime(keep, (old_time, old_time))
+        os.utime(stale, (old_time, old_time))
+
+        assert retention.cleanup_old_uploads(hours=1) == 1
+        assert keep.exists()
+        assert not stale.exists()
+
+    def test_render_client_ip_uses_unforgeable_header(self, monkeypatch) -> None:
+        monkeypatch.setattr(limits.settings, "trusted_proxy_ips", [])
+
+        def request_from(peer: str, headers: dict[str, str]) -> Request:
+            return Request(
+                {
+                    "type": "http",
+                    "method": "POST",
+                    "scheme": "https",
+                    "path": "/",
+                    "query_string": b"",
+                    "client": (peer, 1234),
+                    "server": ("testserver", 443),
+                    "headers": [
+                        (name.lower().encode(), value.encode())
+                        for name, value in headers.items()
+                    ],
+                }
+            )
+
+        behind_render = request_from(
+            "10.0.0.5",
+            {
+                "cf-connecting-ip": "203.0.113.7",
+                "x-forwarded-for": "198.51.100.99, 10.0.0.5",
+            },
+        )
+        assert limits.client_ip(behind_render) == "203.0.113.7"
+
+        direct = request_from(
+            "203.0.113.20", {"cf-connecting-ip": "198.51.100.99"}
+        )
+        assert limits.client_ip(direct) == "203.0.113.20"
+
+    def test_gradio_api_call_posts_are_rate_limited(self, monkeypatch) -> None:
+        monkeypatch.setattr(main.settings, "rate_limit_per_minute", 2)
+        main._request_windows.clear()
+        with TestClient(_rate_limit_app()) as client:
+            codes = [
+                client.post("/gradio_api/call/_generate_prep_handler", json={}).status_code
+                for _ in range(4)
+            ]
+        assert codes == [200, 200, 429, 429]
+
+    def test_pytest_is_only_in_dev_requirements(self) -> None:
+        production = Path("requirements.txt").read_text(encoding="utf-8").lower()
+        development = Path("requirements-dev.txt").read_text(encoding="utf-8").lower()
+        assert "pytest" not in production
+        assert "pytest==" in development

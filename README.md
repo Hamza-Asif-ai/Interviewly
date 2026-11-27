@@ -193,16 +193,16 @@ Model names were checked against Google's official Models page. On Render, updat
 ### Reliability, concurrency, retention & privacy
 | Setting | Default | Why |
 |---|---|---|
-| `RATE_LIMIT_PER_MINUTE` | `20` | Per-client cap on expensive `POST /prep/generate` and `POST /practice/upload` only; UI/health/queue polling is never rate-limited |
+| `RATE_LIMIT_PER_MINUTE` | `20` | Per-client cap on expensive `POST /prep/generate`, `POST /practice/upload` and Gradio `call`/`run`/`queue` POST routes; UI/health polling is never rate-limited |
 | `MAX_CONCURRENT_ANALYSES` | `2` | Single bounded semaphore shared by the API and Gradio handlers |
-| `TRUSTED_PROXY_IPS` | (empty) | Comma-separated proxies allowed to set `X-Forwarded-For`; empty means direct peer only (safe behind Render) |
+| `TRUSTED_PROXY_IPS` | (empty) | Comma-separated proxies allowed to set `X-Forwarded-For`; behind Render's Cloudflare edge, `CF-Connecting-IP` is used automatically from the proxy peer |
 | `CORS_ORIGINS` | (empty) | Comma-separated allowed browser origins; empty means localhost only |
 | `RETENTION_HOURS` | `168` | SQLite records and orphaned uploads older than this are deleted on startup and periodically |
 | `RETENTION_INTERVAL_HOURS` | `6` | How often the background retention task runs |
 | `PDF_TTL_HOURS` | `48` | Generated PDFs older than this are deleted before each export and during retention cleanup |
 | `PDF_FONT_PATH` | (auto) | Optional path to a DejaVu Unicode `.ttf`; no font is bundled or claimed |
 
-Uploaded files are deleted in `finally` blocks as soon as processing succeeds or fails. The transcript and pasted text are sent to the configured LLM provider for scoring/guide generation; scorecards, transcripts and guides are retained only until the configured retention window expires.
+Uploaded files are deleted in `finally` blocks as soon as processing succeeds or fails. The text extracted from the uploaded CV is sent to the configured LLM provider along with the transcript and pasted text for scoring/guide generation; scorecards, transcripts and guides are retained only until the configured retention window expires.
 
 ---
 
